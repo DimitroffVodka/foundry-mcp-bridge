@@ -86,6 +86,8 @@ Some tools mutate live Foundry state — they will change what GMs and players s
 
 **Mutating tools include** (not exhaustive — check the tool description): `move_token`, `move_token_pathed`, `update_token`, `delete_tokens`, `toggle_token_condition`, `use_item`, `roll`, `reload_foundry`, `target`, `click`, `simulate_dialog_response`, and `evaluate` if enabled.
 
+**World-authoring tools** (only present when `FOUNDRY_MCP_ALLOW_WRITE=1` on the server): `create_folder`, `create_actor`, `create_actor_from_compendium`, `add_items_to_actor`, `create_journal_entry`, `update_journal_page`. These create persistent world data — actors, journals, folders. If they're not in your tool list, the server's write gate is off and that's intentional; tell the user to set the env var rather than retrying.
+
 **Read-only safe to explore with:** `list_*`, `get_*`, `snapshot_*`, `diff_*`, `search_compendium`, `screenshot`, `capture_scene`, `get_console_errors`, `trace_*`.
 
 ## Quick smoke test
@@ -98,3 +100,21 @@ After configuration, in order. If multiple bridges are connected, pick one `targ
 4. `get_scene` (with same `targetUser`) — sanity check on read-only state queries against the active scene.
 
 If those four work, the integration is healthy.
+
+
+<claude-mem-context>
+# Memory Context
+
+# claude-mem status
+
+This project has no memory yet. The current session will seed it; subsequent sessions will receive auto-injected context for relevant past work.
+
+Memory injection starts on your second session in a project.
+
+`/learn-codebase` is available if the user wants to front-load the entire repo into memory in a single pass (~5 minutes on a typical repo, optional). Otherwise memory builds passively as work happens.
+
+Live activity: http://localhost:37777
+How it works: `/how-it-works`
+
+This message disappears once the first observation lands.
+</claude-mem-context>

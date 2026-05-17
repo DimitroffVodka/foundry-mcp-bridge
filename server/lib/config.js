@@ -20,3 +20,9 @@ export const BRIDGE_TOKEN     = process.env.BRIDGE_TOKEN ?? "";
 // `evaluate` runs arbitrary JS in the live Foundry browser context. Gated
 // behind an explicit opt-in to make the default install safer.
 export const ALLOW_EVAL       = /^(1|true|yes)$/i.test(process.env.FOUNDRY_MCP_ALLOW_EVAL ?? "");
+
+// World-authoring tools (create_folder, create_actor*, add_items_to_actor,
+// create_journal_entry, update_journal_page) create persistent world data.
+// Gated behind an explicit opt-in so the default install can't be tricked
+// into mutating the world via an LLM hallucination.
+export const ALLOW_WRITE      = /^(1|true|yes)$/i.test(process.env.FOUNDRY_MCP_ALLOW_WRITE ?? "");

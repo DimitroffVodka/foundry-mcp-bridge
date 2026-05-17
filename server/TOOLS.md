@@ -432,6 +432,80 @@ Set the current user's targets. Equivalent to hovering tokens and pressing T. **
 
 ---
 
+## World authoring (opt-in: FOUNDRY_MCP_ALLOW_WRITE=1)
+
+These tools **create and modify persistent world data** (actors, items, journals, folders). They are gated behind `FOUNDRY_MCP_ALLOW_WRITE=1` on the server. With the gate off, none of them are registered — they don't appear in any MCP client's tool list and cannot be called.
+
+They all route through `targetUser`. The actual document creation runs in that user's browser context with that user's permissions.
+
+### `create_folder`
+Create a sidebar folder. **Idempotent** — if a folder with the same `type` + `name` + `parentFolder` already exists, returns it with `existed: true` instead of creating a duplicate.
+
+- **Params**:
+  - `type` — `"Actor"`, `"Item"`, `"JournalEntry"`, `"Scene"`, `"Macro"`, `"Playlist"`, `"RollTable"`, or `"Cards"`.
+  - `name` — folder name (case-sensitive).
+  - `parentFolder` (optional) — parent folder id or exact name within the same `type`.
+  - `color` (optional) — hex like `"#3a5"`.
+- **Returns**: `{ id, name, type, parent, existed }`.
+
+### `create_actor_from_compendium`
+Import an actor from a compendium pack into the world.
+
+- **Params**:
+  - `pack` — pack id (e.g. `"dnd5e.monsters"`).
+  - `documentId` — document id within the pack (use `search_compendium` to find).
+  - `folderId` (optional) — target folder id.
+  - `folderName` (optional) — target folder by exact name. Auto-created as an `Actor` folder if missing. `folderId` wins if both are given.
+  - `nameOverride` (optional) — rename on import.
+- **Returns**: `{ id, name, type, folder, sourcePack, sourceDocId }`.
+
+### `create_actor`
+Create a brand-new actor in the world. System-agnostic — `system` is the system-specific data block.
+
+> **Call `get_data_model({type:"Actor", subtype:"<type>"})` first** if you don't already know the shape for the active system. Without that, you'll likely produce a malformed actor.
+
+- **Params**:
+  - `name` — actor name.
+  - `type` — system-specific actor subtype (e.g. `"character"`, `"npc"` for dnd5e).
+  - `system` (optional) — system-specific data object.
+  - `items` (optional) — inline items to attach at creation. Each entry is either `{ pack, documentId, nameOverride? }` (compendium ref) or `{ name, type, system?, ... }` (inline).
+  - `img` (optional) — portrait path/URL.
+  - `prototypeToken` (optional) — prototype token data.
+  - `folderId` / `folderName` (optional) — same semantics as `create_actor_from_compendium`.
+- **Returns**: `{ id, name, type, folder, itemIds }`.
+
+### `add_items_to_actor`
+Add embedded items (weapons, spells, gear, features) to an existing actor.
+
+- **Params**:
+  - `actorId` — actor document id.
+  - `items` — array of `{ pack, documentId, nameOverride? }` (compendium) or `{ name, type, system?, ... }` (inline) entries.
+- **Returns**: `{ actorId, added: [{ id, name, source }] }` — `source` is `"<pack>/<docId>"` for compendium imports or `"inline"`.
+
+### `create_journal_entry`
+Create a journal entry with one or more pages.
+
+- **Params**:
+  - `name` — journal entry name (sidebar label).
+  - `pages` — non-empty array of `{ name, type?, text?: { content, format? }, src? }`.
+    - `type` defaults to `"text"`. Other values: `"image"`, `"pdf"`, `"video"` (use `src`).
+    - `text.format` defaults to `1` (HTML). `2` is Markdown.
+  - `folderId` / `folderName` (optional) — same semantics as the other writes. Auto-created as a `JournalEntry` folder if needed.
+- **Returns**: `{ id, name, folder, pageIds }`.
+
+### `update_journal_page`
+Update a journal page's name and/or text content. Designed for **iterative writing** — first call creates a skeleton via `create_journal_entry`, follow-up calls flesh it out.
+
+- **Params**:
+  - `journalId` — parent journal entry id.
+  - `pageId` — page id within that journal.
+  - `name` (optional) — replace page name.
+  - `content` (optional) — replace page body wholesale.
+  - `appendContent` (optional) — append to existing body. Ignored if `content` is also given.
+- **Returns**: `{ journalId, pageId, fieldsUpdated }` — `fieldsUpdated` lists which fields actually changed (`"name"`, `"text.content (replaced)"`, `"text.content (appended)"`).
+
+---
+
 ## Patterns & workflows
 
 **Discovery flow** — "what's happening?":

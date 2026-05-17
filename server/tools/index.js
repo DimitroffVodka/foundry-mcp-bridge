@@ -26,6 +26,7 @@ export async function registerTools(mcp) {
     { registerDiceTools },
     { registerSnapshotTools },
     { registerServerLocalTools },
+    { registerWorldAuthoringTools },
   ] = await Promise.all([
     import("./world.js" + cb),
     import("./canvas.js" + cb),
@@ -34,6 +35,7 @@ export async function registerTools(mcp) {
     import("./dice.js" + cb),
     import("./snapshot.js" + cb),
     import("./server-local.js" + cb),
+    import("./world-authoring.js" + cb),
   ]);
 
   registerWorldTools(mcp);
@@ -43,4 +45,5 @@ export async function registerTools(mcp) {
   registerDiceTools(mcp);
   registerSnapshotTools(mcp);
   registerServerLocalTools(mcp);
+  registerWorldAuthoringTools(mcp);
 }

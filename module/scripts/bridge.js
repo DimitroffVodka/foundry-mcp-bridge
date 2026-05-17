@@ -599,6 +599,61 @@ function _removeGridOverlay(canvasRef, overlay) {
 }
 
 // ---------------------------------------------------------------------------
+// Shared helpers for world-authoring handlers
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve an item descriptor (either { pack, documentId } from a compendium,
+ * or an inline { name, type, system, ... } definition) into a creation-ready
+ * data object suitable for Actor.create's `items` array or
+ * `actor.createEmbeddedDocuments("Item", [...])`.
+ *
+ * Throws on invalid input — caller's dispatcher returns the message as the
+ * tool error payload.
+ */
+async function _resolveItemRef(item) {
+  if (item == null || typeof item !== "object") {
+    throw new Error("Item descriptor must be an object");
+  }
+  if (item.pack && item.documentId) {
+    const pack = game.packs.get(item.pack);
+    if (!pack) throw new Error(`Pack "${item.pack}" not found`);
+    const doc = await pack.getDocument(item.documentId);
+    if (!doc) throw new Error(`Document "${item.documentId}" not found in pack "${item.pack}"`);
+    const data = doc.toObject();
+    if (item.nameOverride) data.name = item.nameOverride;
+    return data;
+  }
+  if (!item.name || !item.type) {
+    throw new Error("Inline item requires at least `name` and `type`");
+  }
+  return item;
+}
+
+/**
+ * Resolve a folder reference (id wins, else exact-name match within type, else
+ * auto-create when `autoCreate` is true). Returns the resolved folder id or
+ * null when no reference was provided. Throws if a name was given but cannot
+ * be found AND autoCreate is false.
+ */
+async function _resolveFolder(type, folderId, folderName, autoCreate = true) {
+  if (folderId) {
+    const existing = game.folders.get(folderId);
+    if (!existing) throw new Error(`Folder "${folderId}" not found`);
+    if (existing.type !== type) {
+      throw new Error(`Folder "${folderId}" is type ${existing.type}, expected ${type}`);
+    }
+    return existing.id;
+  }
+  if (!folderName) return null;
+  const existing = game.folders.find(f => f.type === type && f.name === folderName);
+  if (existing) return existing.id;
+  if (!autoCreate) throw new Error(`Folder "${folderName}" of type ${type} not found`);
+  const created = await Folder.create({ name: folderName, type });
+  return created.id;
+}
+
+// ---------------------------------------------------------------------------
 // Request handlers — each returns serialisable data
 // ---------------------------------------------------------------------------
 const handlers = {
@@ -1801,6 +1856,224 @@ const handlers = {
       const evalMs = +(performance.now() - t0).toFixed(2);
       return { error: err.message, stack: err.stack, evalMs };
     }
+  },
+
+  // -------------------------------------------------------------------------
+  // World authoring — server-side these tools are only registered when
+  // FOUNDRY_MCP_ALLOW_WRITE=1, so a default-config server can't reach them
+  // even if the bridge is online. Handlers throw on bad input; the bridge's
+  // top-level dispatcher converts that to a structured error.
+  // -------------------------------------------------------------------------
+
+  /**
+   * Create a folder (idempotent on `type + name + parentFolder`). When a
+   * folder with the same triple already exists, return it with `existed: true`
+   * instead of creating a duplicate.
+   */
+  create_folder: async (params = {}) => {
+    const { type, name, parentFolder, color } = params;
+    if (!type || !name) throw new Error("`type` and `name` are required");
+
+    let parentId = null;
+    if (parentFolder) {
+      const parent = game.folders.get(parentFolder)
+        ?? game.folders.find(f => f.type === type && f.name === parentFolder);
+      if (!parent) throw new Error(`Parent folder "${parentFolder}" not found for type ${type}`);
+      parentId = parent.id;
+    }
+
+    const existing = game.folders.find(f =>
+      f.type === type && f.name === name && (f.folder?.id ?? null) === parentId
+    );
+    if (existing) {
+      return { id: existing.id, name: existing.name, type: existing.type, parent: parentId, existed: true };
+    }
+
+    const created = await Folder.create({
+      name, type,
+      folder: parentId,
+      ...(color ? { color } : {})
+    });
+    return { id: created.id, name: created.name, type: created.type, parent: parentId, existed: false };
+  },
+
+  /**
+   * Import an actor from a compendium pack into the world. The folder is
+   * resolved by id, then by exact name (auto-created if missing).
+   */
+  create_actor_from_compendium: async (params = {}) => {
+    const { pack, documentId, folderId, folderName, nameOverride } = params;
+    if (!pack || !documentId) throw new Error("`pack` and `documentId` are required");
+
+    const compendium = game.packs.get(pack);
+    if (!compendium) throw new Error(`Compendium pack "${pack}" not found`);
+    if (compendium.metadata.type !== "Actor") {
+      throw new Error(`Pack "${pack}" holds ${compendium.metadata.type} documents, not Actor`);
+    }
+
+    const resolvedFolderId = await _resolveFolder("Actor", folderId, folderName, true);
+
+    const imported = await game.actors.importFromCompendium(
+      compendium,
+      documentId,
+      {
+        folder: resolvedFolderId,
+        ...(nameOverride ? { name: nameOverride } : {})
+      }
+    );
+    if (!imported) throw new Error(`Failed to import "${documentId}" from "${pack}"`);
+
+    return {
+      id: imported.id,
+      name: imported.name,
+      type: imported.type,
+      folder: resolvedFolderId,
+      sourcePack: pack,
+      sourceDocId: documentId
+    };
+  },
+
+  /**
+   * Create a world actor from scratch. System-agnostic — caller is expected
+   * to supply system-correct `system` data (use `get_data_model` first to
+   * learn the shape for the active system).
+   */
+  create_actor: async (params = {}) => {
+    const { name, type, system, items, img, prototypeToken, folderId, folderName } = params;
+    if (!name || !type) throw new Error("`name` and `type` are required");
+
+    const resolvedFolderId = await _resolveFolder("Actor", folderId, folderName, true);
+
+    const createData = { name, type, folder: resolvedFolderId };
+    if (system) createData.system = system;
+    if (img) createData.img = img;
+    if (prototypeToken) createData.prototypeToken = prototypeToken;
+    if (Array.isArray(items) && items.length) {
+      createData.items = await Promise.all(items.map(_resolveItemRef));
+    }
+
+    const created = await Actor.create(createData);
+    if (!created) throw new Error("Actor.create returned no document");
+
+    return {
+      id: created.id,
+      name: created.name,
+      type: created.type,
+      folder: resolvedFolderId,
+      itemIds: created.items.contents.map(i => i.id)
+    };
+  },
+
+  /**
+   * Add items to an existing actor. Items may be compendium refs
+   * (`{ pack, documentId, nameOverride? }`) or inline definitions
+   * (`{ name, type, system?, ... }`).
+   */
+  add_items_to_actor: async (params = {}) => {
+    const { actorId, items } = params;
+    if (!actorId) throw new Error("`actorId` is required");
+    if (!Array.isArray(items) || items.length === 0) {
+      throw new Error("`items` must be a non-empty array");
+    }
+
+    const actor = game.actors.get(actorId);
+    if (!actor) throw new Error(`Actor "${actorId}" not found`);
+
+    const resolved = await Promise.all(items.map(_resolveItemRef));
+    const created = await actor.createEmbeddedDocuments("Item", resolved);
+
+    return {
+      actorId,
+      added: created.map((doc, i) => ({
+        id: doc.id,
+        name: doc.name,
+        source: items[i].pack
+          ? `${items[i].pack}/${items[i].documentId}`
+          : "inline"
+      }))
+    };
+  },
+
+  /**
+   * Create a journal entry with one or more pages. Pages default to type
+   * "text" with HTML format; specify `text.format: 2` for Markdown.
+   */
+  create_journal_entry: async (params = {}) => {
+    const { name, pages, folderId, folderName } = params;
+    if (!name) throw new Error("`name` is required");
+    if (!Array.isArray(pages) || pages.length === 0) {
+      throw new Error("`pages` must be a non-empty array");
+    }
+
+    const resolvedFolderId = await _resolveFolder("JournalEntry", folderId, folderName, true);
+
+    const normalizedPages = pages.map((p, i) => {
+      if (!p?.name) throw new Error(`pages[${i}].name is required`);
+      const pageData = { name: p.name, type: p.type ?? "text" };
+      if (pageData.type === "text") {
+        pageData.text = {
+          content: p.text?.content ?? "",
+          format:  p.text?.format  ?? 1
+        };
+      } else if (p.src) {
+        pageData.src = p.src;
+      }
+      return pageData;
+    });
+
+    const created = await JournalEntry.create({
+      name,
+      folder: resolvedFolderId,
+      pages: normalizedPages
+    });
+    if (!created) throw new Error("JournalEntry.create returned no document");
+
+    return {
+      id: created.id,
+      name: created.name,
+      folder: resolvedFolderId,
+      pageIds: created.pages.contents.map(p => p.id)
+    };
+  },
+
+  /**
+   * Update a journal page's name and/or text content. Use `content` to
+   * replace the body wholesale; use `appendContent` to add to the existing
+   * body without losing it. At least one of name/content/appendContent
+   * must be provided.
+   */
+  update_journal_page: async (params = {}) => {
+    const { journalId, pageId, name, content, appendContent } = params;
+    if (!journalId || !pageId) throw new Error("`journalId` and `pageId` are required");
+
+    const journal = game.journal.get(journalId);
+    if (!journal) throw new Error(`Journal "${journalId}" not found`);
+
+    const page = journal.pages.get(pageId);
+    if (!page) throw new Error(`Page "${pageId}" not found in journal "${journalId}"`);
+
+    const updateData = {};
+    const fieldsUpdated = [];
+
+    if (typeof name === "string") {
+      updateData.name = name;
+      fieldsUpdated.push("name");
+    }
+    if (typeof content === "string") {
+      updateData["text.content"] = content;
+      fieldsUpdated.push("text.content (replaced)");
+    } else if (typeof appendContent === "string") {
+      const current = page.text?.content ?? "";
+      updateData["text.content"] = current + appendContent;
+      fieldsUpdated.push("text.content (appended)");
+    }
+
+    if (fieldsUpdated.length === 0) {
+      throw new Error("Provide at least one of: `name`, `content`, `appendContent`");
+    }
+
+    await page.update(updateData);
+    return { journalId, pageId, fieldsUpdated };
   }
 };
 

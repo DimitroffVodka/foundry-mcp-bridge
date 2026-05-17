@@ -18,6 +18,7 @@ The bridge exposes a set of MCP tools that read and modify Foundry state, plus a
 
 - Read every actor, item, journal, scene, compendium entry, and console log.
 - Move tokens, open/close doors, toggle conditions, target tokens.
+- (Opt-in) Create persistent world data — actors, items, journals, folders.
 - (Opt-in) Execute arbitrary JS as the logged-in Foundry user (typically the GM).
 
 Treat the MCP endpoint with the same trust you'd give a logged-in GM browser session.
@@ -27,6 +28,7 @@ Treat the MCP endpoint with the same trust you'd give a logged-in GM browser ses
 - **Loopback binding.** Both HTTP (3000) and WebSocket (3001) bind to `127.0.0.1`.
 - **CORS lockdown.** The HTTP server rejects any `Origin` header that isn't `localhost` / `127.0.0.1` / `[::1]`. CLI clients (no `Origin`) and the proxy.mjs stdio bridge are unaffected. A malicious site visited in another tab cannot POST to the MCP endpoint with a custom JSON Content-Type without a preflight, and the preflight gets a 403.
 - **`evaluate` is opt-in.** The most dangerous tool is disabled unless `FOUNDRY_MCP_ALLOW_EVAL=1` is set in the server's environment.
+- **World-authoring tools are opt-in.** `create_folder`, `create_actor`, `create_actor_from_compendium`, `add_items_to_actor`, `create_journal_entry`, and `update_journal_page` are disabled unless `FOUNDRY_MCP_ALLOW_WRITE=1` is set. With the gate off they aren't even registered, so they don't appear in any MCP client's tool list.
 - **Vendored dependencies.** `html2canvas` is bundled in `module/lib/`; the module never fetches code from a CDN at runtime.
 
 ## Opt-in: token auth
@@ -63,6 +65,18 @@ FOUNDRY_MCP_ALLOW_EVAL=1 npm start
 ```
 
 You probably want this enabled for serious work — most module debugging benefits from `evaluate`. The opt-in is so that someone trying the bridge for the first time doesn't accidentally hand RCE to a misbehaving AI.
+
+## Opt-in: enable world authoring
+
+```bash
+FOUNDRY_MCP_ALLOW_WRITE=1 npm start
+```
+
+Enables `create_folder`, `create_actor`, `create_actor_from_compendium`, `add_items_to_actor`, `create_journal_entry`, and `update_journal_page` — all tools that create or modify persistent world data (actors, journals, folders).
+
+These are safer than `evaluate` (no arbitrary code execution) but still write to your world. A misbehaving AI could litter your sidebar with junk folders or overwrite a journal page. Foundry's undo stops at the page level for journals, so a single `update_journal_page` with `content` (vs. `appendContent`) replaces the body and isn't recoverable from the UI.
+
+For Codex CLI users: pairing this opt-in with per-tool `approval_mode = "approve"` on at least `update_journal_page` is a reasonable belt-and-suspenders setup.
 
 ## Known residual risks
 
