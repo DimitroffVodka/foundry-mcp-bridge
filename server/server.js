@@ -127,7 +127,7 @@ app.all("/mcp", async (req, res) => {
     }
   };
 
-  const mcp = new McpServer({ name: "foundry-vtt", version: "0.8.0" });
+  const mcp = new McpServer({ name: "foundry-vtt", version: "0.8.1" });
   await registerTools(mcp);
   await mcp.connect(transport);
   await transport.handleRequest(req, res, req.body);

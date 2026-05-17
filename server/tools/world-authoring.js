@@ -66,17 +66,17 @@ export function registerWorldAuthoringTools(mcp) {
         + "'Player' for shadowdark). Use `get_data_model({type: 'Actor'})` "
         + "to see valid types in the active system."
       ),
-      system:         z.record(z.any()).optional().describe(
+      system:         z.record(z.string(), z.any()).optional().describe(
         "System-specific data block. Shape varies per game system. "
         + "Use `get_data_model({type: 'Actor', subtype: '<type>'})` to learn the structure."
       ),
-      items:          z.array(z.record(z.any())).optional().describe(
+      items:          z.array(z.record(z.string(), z.any())).optional().describe(
         "Optional inline items to attach at creation. Each entry is either "
         + "{ pack, documentId, nameOverride? } (from a compendium) or "
         + "{ name, type, system, ... } (inline definition)."
       ),
       img:            z.string().optional().describe("Portrait image path/URL."),
-      prototypeToken: z.record(z.any()).optional().describe(
+      prototypeToken: z.record(z.string(), z.any()).optional().describe(
         "Optional prototype token data (img, scale, disposition, etc.)."
       ),
       folderId:       z.string().optional().describe("Target folder id."),
@@ -93,7 +93,7 @@ export function registerWorldAuthoringTools(mcp) {
     + "customizing a base creature without altering the source pack.",
     {
       actorId: z.string().describe("Actor document id."),
-      items:   z.array(z.record(z.any())).describe(
+      items:   z.array(z.record(z.string(), z.any())).describe(
         "Items to add. Each entry is { pack, documentId, nameOverride? } "
         + "(compendium ref) OR { name, type, system?, ... } (inline)."
       ),
