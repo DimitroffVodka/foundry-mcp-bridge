@@ -17,7 +17,7 @@
  * installs keep working until they're upgraded.
  */
 import { WebSocketServer } from "ws";
-import { WS_PORT, HELLO_DEADLINE_MS, BRIDGE_TOKEN } from "./config.js";
+import { WS_PORT, WS_HOST, HELLO_DEADLINE_MS, BRIDGE_TOKEN } from "./config.js";
 import { log }                        from "./log.js";
 import { pendingRequests }            from "./foundry-rpc.js";
 
@@ -78,7 +78,7 @@ export function routeBridge(targetUser) {
  * or graceful shutdown handlers.
  */
 export function startBridgeServer() {
-  const wss = new WebSocketServer({ port: WS_PORT });
+  const wss = new WebSocketServer({ port: WS_PORT, host: WS_HOST });
 
   wss.on("connection", (socket) => {
     log("Foundry bridge socket opened (awaiting hello)");
@@ -195,6 +195,6 @@ export function startBridgeServer() {
     });
   });
 
-  log(`WebSocket bridge listening on ws://127.0.0.1:${WS_PORT}`);
+  log(`WebSocket bridge listening on ws://${WS_HOST}:${WS_PORT}`);
   return wss;
 }

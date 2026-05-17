@@ -111,7 +111,7 @@ export function registerServerLocalTools(mcp) {
             + "  window.location.replace(u.toString()); "
             + "}, 50); "
             + "'reloading'",
-        }, targetUserName);
+        }, targetUserId);
       } catch { /* expected — socket closes during reload */ }
 
       // Wait for the new bridge with the same userId to announce via hello.
@@ -146,7 +146,7 @@ export function registerServerLocalTools(mcp) {
         try {
           const reply = await requestFoundry("evaluate", {
             expression: "return game?.ready === true;",
-          }, targetUserName);
+          }, targetUserId);
           if (reply?.result === true) { gameReadyAt = Date.now(); break; }
         } catch { /* not ready yet, keep polling */ }
         await new Promise(r => setTimeout(r, 200));

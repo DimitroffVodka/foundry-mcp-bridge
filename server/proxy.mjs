@@ -44,9 +44,12 @@ async function main() {
 
   process.stderr.write(`[foundry-proxy] Connected to ${HTTP_URL}\n`);
 
-  // ── Discover tools from the upstream server ───────────────────────────────
-  const { tools } = await client.listTools();
-  process.stderr.write(`[foundry-proxy] Proxying ${tools.length} tools\n`);
+  // ── Verify connection and log initial tool count ──────────────────────────
+  // The full list is re-fetched on every ListTools request below so hot-reloaded
+  // tool schemas/additions in the upstream server propagate immediately to the
+  // stdio client without restarting the proxy.
+  const initial = await client.listTools();
+  process.stderr.write(`[foundry-proxy] Connected, ${initial.tools.length} tools available (re-fetched per call)\n`);
 
   // ── Local stdio server that forwards every call upstream ──────────────────
   const server = new Server(
@@ -54,7 +57,10 @@ async function main() {
     { capabilities: { tools: {} } }
   );
 
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools }));
+  server.setRequestHandler(ListToolsRequestSchema, async () => {
+    const { tools } = await client.listTools();
+    return { tools };
+  });
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     return await client.callTool({

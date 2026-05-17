@@ -22,7 +22,7 @@ On your first interaction in this repo, before doing anything else:
    }
    ```
 
-   **If multiple bridges are returned** (e.g. a local and a hosted Foundry world both running), pick one and thread its `targetUser` field through every subsequent tool call. Do not rely on the default GM route when more than one bridge is connected — both may be GM and the default is undefined in that case.
+   **If multiple bridges are returned** (e.g. a local and a hosted Foundry world both running), pick one and thread its `targetUser` field through every subsequent tool call. Do not rely on the default GM route when more than one bridge is connected; both may be GM, and the default may not be the world the user intended.
 3. **If the tool isn't in your tool list at all** → your MCP client isn't connected to the server. Re-read the setup sections below and tell the user which step is missing. Do **not** web-search for tool names; the tool list is exposed by the server itself.
 4. **If the tool errors or returns an empty array** → the HTTP server is reachable but no Foundry world has the `foundry-mcp-live` module active. Tell the user to open Foundry and verify the module is enabled. Do **not** retry blindly or guess.
 
@@ -78,7 +78,7 @@ The server's env may set `BRIDGE_TOKEN=<secret>`. In that case every request to 
 
 ## Multi-GM routing
 
-If multiple Foundry users with the same name are connected (e.g. two GMs on different worlds), use the `targetUser` parameter on tool calls. Get valid targets from `list_connected_bridges`. Examples: `"Gamemaster@localhost:30000"`, `"Gamemaster@shadowfoundry.online"`. Omit `targetUser` to hit the default GM.
+If multiple Foundry users with the same name are connected (e.g. two GMs on different worlds), use the `targetUser` parameter on tool calls. Get valid targets from `list_connected_bridges` and prefer the returned `targetUser` value. Examples: `"Gamemaster@localhost:30000"`, `"Gamemaster@shadowfoundry.online"`. Omit `targetUser` only when the default GM route is definitely the intended world.
 
 ## Mutation caution
 

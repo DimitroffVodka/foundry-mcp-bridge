@@ -3,6 +3,7 @@
  * Imported by both bridge management and MCP transport layers.
  */
 export const WS_PORT          = parseInt(process.env.FOUNDRY_WS_PORT  ?? "3001", 10);
+export const WS_HOST          = process.env.FOUNDRY_WS_HOST ?? "127.0.0.1";
 export const HTTP_PORT        = parseInt(process.env.FOUNDRY_MCP_PORT ?? "3000", 10);
 export const REQUEST_TIMEOUT  = 15_000;
 export const HELLO_DEADLINE_MS = 3000;

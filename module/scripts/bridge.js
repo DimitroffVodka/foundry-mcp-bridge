@@ -45,11 +45,23 @@ const errorBuffer = [];
 const _origError = console.error;
 const _origWarn = console.warn;
 
+// Safely stringify an arbitrary console arg. Foundry passes circular doc
+// references and prototype-rich objects through console.error/warn; a naive
+// JSON.stringify throws on cycles and propagates the throw out of the wrapper,
+// which would silently break normal logging. Reuse safeSerializeHookArg (defined
+// later in this file — function declarations hoist) for depth-limited,
+// cycle-safe serialization, with a string fallback if anything still throws.
+const _safeStringifyConsoleArg = (a) => {
+  if (a === null || typeof a !== "object") return String(a);
+  try { return JSON.stringify(safeSerializeHookArg(a), null, 2); }
+  catch { try { return String(a); } catch { return "[unserializable]"; } }
+};
+
 console.error = (...args) => {
   _origError.apply(console, args);
   errorBuffer.push({
     level: "error",
-    message: args.map(a => (typeof a === "object" ? JSON.stringify(a, null, 2) : String(a))).join(" "),
+    message: args.map(_safeStringifyConsoleArg).join(" "),
     timestamp: Date.now()
   });
   if (errorBuffer.length > MAX_ERRORS) errorBuffer.shift();
@@ -59,7 +71,7 @@ console.warn = (...args) => {
   _origWarn.apply(console, args);
   errorBuffer.push({
     level: "warn",
-    message: args.map(a => (typeof a === "object" ? JSON.stringify(a, null, 2) : String(a))).join(" "),
+    message: args.map(_safeStringifyConsoleArg).join(" "),
     timestamp: Date.now()
   });
   if (errorBuffer.length > MAX_ERRORS) errorBuffer.shift();
@@ -820,11 +832,20 @@ const handlers = {
     const template = game.system.template?.[type] ?? null;
     if (template) return template;
 
-    // Fallback: grab the first actor/item of the requested sub-type and return its system data
-    if (type === "Actor" || !params.subtype) {
-      const sample = game.actors.contents[0];
-      if (sample) return { _sampleFrom: sample.name, system: sample.toObject().system };
-    }
+    // Fallback: sample a document of the requested type (and subtype if given)
+    // and return its system data so callers can introspect the live shape even
+    // when the system declares no static template for the type.
+    const collection = type === "Actor" ? game.actors
+                     : type === "Item"  ? game.items
+                     : null;
+    if (!collection) return { error: "No template or sample data found" };
+
+    const candidates = params.subtype
+      ? collection.contents.filter(d => d.type === params.subtype)
+      : collection.contents;
+    const sample = candidates[0];
+    if (sample) return { _sampleFrom: sample.name, system: sample.toObject().system };
+
     return { error: "No template or sample data found" };
   },
 
