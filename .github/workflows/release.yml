@@ -26,7 +26,9 @@ jobs:
       - name: Build module.zip
         run: |
           cd module
-          zip -r ../module.zip module.json scripts
+          # Include everything Foundry needs to serve at runtime.
+          # Add any new top-level module subdirs here if you create them.
+          zip -r ../module.zip module.json scripts lib
 
       - name: Create release
         env:
