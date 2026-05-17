@@ -80,6 +80,38 @@ MCP HTTP server  listening on http://127.0.0.1:3000/mcp
 
 Keep this terminal open. The server auto-reloads tool files but other changes need a restart.
 
+#### Optional: enable opt-in tools
+
+Two categories of tools are **off by default** and won't appear in any client's tool list until you enable them. Read [SECURITY.md](SECURITY.md) before flipping these on.
+
+| Env var | Adds | Risk if mis-used |
+|---|---|---|
+| `FOUNDRY_MCP_ALLOW_WRITE=1` | `create_folder`, `create_actor`, `create_actor_from_compendium`, `add_items_to_actor`, `create_journal_entry`, `update_journal_page` | Creates/overwrites persistent world data (actors, journals, folders) |
+| `FOUNDRY_MCP_ALLOW_EVAL=1` | `evaluate` | Arbitrary JS in your Foundry browser context — same trust level as your GM session |
+
+**One-off** (just this terminal session):
+
+```powershell
+# Windows PowerShell
+$env:FOUNDRY_MCP_ALLOW_WRITE = "1"
+$env:FOUNDRY_MCP_ALLOW_EVAL  = "1"
+npm start
+```
+
+```bash
+# macOS / Linux
+FOUNDRY_MCP_ALLOW_WRITE=1 FOUNDRY_MCP_ALLOW_EVAL=1 npm start
+```
+
+**Persistent** — edit your launcher so every start picks them up:
+
+- Windows: edit [`server/start.bat`](server/start.bat) and add `set FOUNDRY_MCP_ALLOW_WRITE=1` (and/or `set FOUNDRY_MCP_ALLOW_EVAL=1`) on a line above the `node "%~dp0server.js"` line.
+- macOS/Linux: export them in your shell profile (`~/.zshrc`, `~/.bashrc`), or wrap `npm start` in your own launcher script.
+
+After enabling, the server's startup output is the source of truth. If you set the vars but the new tools still don't appear in your AI client, it usually means the env var didn't actually reach the node process — verify with `echo %FOUNDRY_MCP_ALLOW_WRITE%` (Windows) or `echo $FOUNDRY_MCP_ALLOW_WRITE` (macOS/Linux) in the same shell *before* you launch.
+
+Other tunables (ports, host binding, bearer token) live in the full [Environment variables](#environment-variables) table below.
+
 ### 4. Configure your AI client
 
 Pick one or more. **All four can connect simultaneously** to the same running server.
