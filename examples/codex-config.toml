@@ -1,0 +1,22 @@
+# Append this block to ~/.codex/config.toml
+
+[mcp_servers.foundry]
+url = "http://127.0.0.1:3000/mcp"
+
+# Optional: require explicit approval for specific tools.
+# Remove the lines you don't need.
+
+[mcp_servers.foundry.tools.evaluate]
+approval_mode = "approve"
+
+[mcp_servers.foundry.tools.get_actor]
+approval_mode = "approve"
+
+[mcp_servers.foundry.tools.get_console_errors]
+approval_mode = "approve"
+
+[mcp_servers.foundry.tools.list_compendiums]
+approval_mode = "approve"
+
+[mcp_servers.foundry.tools.list_connected_bridges]
+approval_mode = "approve"

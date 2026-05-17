@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "foundry-vtt": {
+      "command": "node",
+      "args": ["C:\\path\\to\\foundry-mcp-bridge\\server\\proxy.mjs"]
+    }
+  }
+}

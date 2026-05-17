@@ -1,85 +1,141 @@
 # Foundry MCP Bridge
 
-Connect Claude Desktop directly to a running Foundry VTT instance. Claude gets live access to actors, compendiums, modules, console errors, and the full game API — no copy-pasting data, no API tokens.
+Connect any MCP-compatible AI client (Claude Desktop, Claude Code, Codex CLI, Gemini CLI) directly to a running Foundry VTT instance. Get live access to actors, compendiums, modules, console errors, and the full game API — no copy-pasting data, no API tokens.
 
 ## Architecture
 
 ```
-Claude Desktop ←(stdio)→ MCP Server ←(WebSocket:3001)→ Foundry Module
+                          ┌─ Claude Desktop ─(stdio)─┐
+                          │                          │
+                          ├─ Claude Code ────(stdio)─┤
+                          │                          ├──► proxy.mjs ──┐
+                          │                          │                │
+   Foundry browser ◄─(WS:3001)──► MCP Server ◄──(HTTP:3000/mcp)───────┤
+                                                                       │
+                          ┌─ Codex CLI ──────(HTTP)──────────────────►┤
+                          │                                            │
+                          └─ Gemini CLI ─────(HTTP)──────────────────►┘
 ```
 
-- **MCP Server** (Node.js, in `server/`) — Claude Desktop spawns this. It runs a WebSocket server on `localhost:3001`.
-- **Foundry Module** (browser JS, in `module/`) — Connects to the WebSocket server. Handles tool requests against the live `game` object.
+- **MCP Server** (`server/server.js`, Node.js) — Runs locally on `http://127.0.0.1:3000/mcp` (MCP HTTP transport) and `ws://127.0.0.1:3001` (Foundry bridge). Must be started manually and kept running.
+- **Foundry Module** (`module/`, browser JS) — Connects to the WebSocket server on load. Handles tool requests against the live `game` object.
+- **stdio proxy** (`server/proxy.mjs`) — Bridge for clients that only speak stdio MCP (Claude Desktop, Claude Code).
 
 ## Repo layout
 
 ```
 foundry-mcp-bridge/
 ├── module/    ← Foundry VTT module (copy/symlink into Foundry's modules dir)
-└── server/    ← Node.js MCP server (runs locally, spawned by Claude Desktop)
+└── server/    ← Node.js MCP server (run locally with npm start)
 ```
 
 ## Setup
 
-### 1. Clone the repo
+### 1. Clone and install
 
 ```bash
 git clone https://github.com/DimitroffVodka/foundry-mcp-bridge.git
-cd foundry-mcp-bridge
-```
-
-### 2. Install the MCP server
-
-```bash
-cd server
+cd foundry-mcp-bridge/server
 npm install
-cd ..
 ```
 
-### 3. Install the Foundry module
+### 2. Install the Foundry module
 
 Copy or symlink the `module/` folder into your Foundry modules directory, renaming it to `foundry-mcp-bridge`:
 
-**Windows (local Foundry):**
+**Windows:** `%localappdata%\FoundryVTT\Data\modules\foundry-mcp-bridge`
+**Linux:** `/home/foundry/foundrydata/Data/modules/foundry-mcp-bridge`
+**macOS:** `~/Library/Application Support/FoundryVTT/Data/modules/foundry-mcp-bridge`
+
+Activate the module in your world's Module Management settings.
+
+### 3. Start the MCP server
+
+The server is HTTP-based and must be running before any client connects:
+
+```bash
+cd server
+npm start
+# or on Windows: server\start.bat
 ```
-%localappdata%\FoundryVTT\Data\modules\foundry-mcp-bridge
+
+You should see:
+```
+[foundry-mcp] WebSocket server listening on ws://localhost:3001
+MCP HTTP server  listening on http://127.0.0.1:3000/mcp
 ```
 
-**Linux:**
-```
-/home/foundry/foundrydata/Data/modules/foundry-mcp-bridge
-```
+Keep this terminal open. The server auto-reloads tool files but other changes need a restart.
 
-Then activate the module in your world's Module Management settings.
+### 4. Configure your AI client
 
-### 4. Configure Claude Desktop
+Pick one or more. **All four can connect simultaneously** to the same running server.
 
-Edit your Claude Desktop config file:
+#### Claude Desktop
 
-**Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
-**macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
-
-Add the MCP server:
+Edit `%APPDATA%\Claude\claude_desktop_config.json` (Windows) or `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS):
 
 ```json
 {
   "mcpServers": {
     "foundry-vtt": {
       "command": "node",
-      "args": ["C:\\path\\to\\foundry-mcp-bridge\\server\\server.js"]
+      "args": ["C:\\path\\to\\foundry-mcp-bridge\\server\\proxy.mjs"]
     }
   }
 }
 ```
 
-Use the full absolute path to `server/server.js`. Restart Claude Desktop after editing.
+Use the **absolute path** to `proxy.mjs`. Restart Claude Desktop.
+
+#### Claude Code
+
+```bash
+claude mcp add foundry-vtt -- node /absolute/path/to/foundry-mcp-bridge/server/proxy.mjs
+```
+
+Or edit `~/.claude.json` directly with the same `mcpServers` shape as Claude Desktop.
+
+#### Codex CLI
+
+Edit `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.foundry]
+url = "http://127.0.0.1:3000/mcp"
+```
+
+That's the minimum. To require explicit approval for specific tools, add per-tool rules:
+
+```toml
+[mcp_servers.foundry.tools.evaluate]
+approval_mode = "approve"
+
+[mcp_servers.foundry.tools.get_actor]
+approval_mode = "approve"
+```
+
+#### Gemini CLI
+
+Project-level (recommended) — create `.gemini/settings.json` in your project root:
+
+```json
+{
+  "mcpServers": {
+    "foundry-mcp-server": {
+      "url": "http://127.0.0.1:3000/mcp"
+    }
+  }
+}
+```
+
+Or run `gemini mcp add foundry-mcp-server http://127.0.0.1:3000/mcp` from the project directory.
 
 ### 5. Connect
 
-1. Start Claude Desktop (it will spawn the MCP server automatically)
-2. Open your Foundry VTT world with the bridge module active
-3. You should see a notification in Foundry: "MCP Bridge connected to Claude Desktop"
-4. The Foundry MCP tools will appear in Claude Desktop's tool list
+1. Make sure the MCP server is running (step 3).
+2. Open your Foundry VTT world with the bridge module active. You should see a notification: "MCP Bridge connected to Claude Desktop".
+3. Launch your AI client. The Foundry tools should appear in its tool list.
 
 ## Available Tools
 
@@ -104,8 +160,21 @@ Use the full absolute path to `server/server.js`. Restart Claude Desktop after e
 | `get_macro` | Full macro source code |
 | `get_console_errors` | Recent console errors/warnings |
 | `evaluate` | Run arbitrary JS in Foundry context |
+| `list_connected_bridges` | Show which Foundry users are connected (server-local tool) |
 
-See [server/TOOLS.md](server/TOOLS.md) for full tool schemas.
+See [server/TOOLS.md](server/TOOLS.md) for full tool schemas and arguments.
+
+## Multi-user routing
+
+Every tool accepts an optional `targetUser` parameter. The default is the GM. To run a tool as a specific player, pass that player's exact user name:
+
+```js
+evaluate({ expression: "game.user.name", targetUser: "PlayerName" })
+```
+
+The MCP server tracks every connected Foundry user via an identity frame sent on connect (`{ type: "hello", userId, userName, isGM }`). Use `list_connected_bridges` to see who's reachable. Foundry's permission rules apply — a player-targeted call to a GM-only API will surface the same error a player would see in their own console.
+
+Older bridges (v0.1.x) that don't send the hello frame are treated as the legacy GM, so unupgraded installs keep working.
 
 ## Debugging
 
@@ -118,35 +187,33 @@ mcpBridge.errors      // Error buffer contents
 mcpBridge.reconnect() // Force reconnect
 ```
 
-The MCP server logs to stderr (visible in Claude Desktop's developer tools or in the terminal if run manually):
+The MCP server logs to stderr in the terminal where you started it.
+
+To test connectivity without a client:
 
 ```bash
-# Test the server standalone
-node server/server.js
-# You'll see: [foundry-mcp] WebSocket server listening on ws://localhost:3001
+curl -i -X POST http://127.0.0.1:3000/mcp \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"curl","version":"1"}}}'
 ```
 
-## Multi-user routing (v0.2.0+)
+You should get a 200 with an `mcp-session-id` header.
 
-The bridge sends an identity frame to the MCP server on connect (`{ type: "hello", userId, userName, isGM }`). The server tracks every connected Foundry user, so MCP tool calls can target a specific user via the optional `targetUser` parameter.
+## Environment variables
 
-The default route is the GM. To run a tool as a specific player, pass that player's exact user name:
-
-```js
-evaluate({ expression: "game.user.name", targetUser: "PlayerName" })
-```
-
-Use `list_connected_bridges` (a server-local MCP tool) to see who's currently reachable. Foundry's permission rules apply.
-
-Older bridges (v0.1.x and earlier) that don't send the hello frame are treated by the server as the legacy GM, so unupgraded installs keep working.
+| Var | Default | Purpose |
+|-----|---------|---------|
+| `FOUNDRY_WS_PORT` | `3001` | WebSocket port the Foundry module connects to |
+| `FOUNDRY_MCP_PORT` | `3000` | HTTP port MCP clients connect to |
+| `FOUNDRY_MCP_URL` | `http://127.0.0.1:3000/mcp` | Used by `proxy.mjs` to find the HTTP server |
 
 ## Notes
 
-- The WebSocket connection auto-reconnects every 5 seconds if Foundry is reloaded. The hello frame is re-sent each time the connection opens.
-- Console error capture starts when the module loads — errors before `ready` hook are missed.
-- The `evaluate` tool runs arbitrary JS in the Foundry client context. It's the most powerful tool and the most dangerous. Claude will use it when the structured tools don't cover what's needed.
-- The MCP server binds to `localhost` only — not exposed to the network.
-- No API tokens are consumed. All communication is local: Claude Desktop ↔ MCP server ↔ Foundry.
+- The WebSocket connection auto-reconnects every 5 seconds if Foundry is reloaded. The hello frame is re-sent each time.
+- Console error capture starts when the module loads — errors before the `ready` hook are missed.
+- The `evaluate` tool runs arbitrary JS in the Foundry client context. It's the most powerful tool and the most dangerous.
+- Both ports bind to `127.0.0.1` only — not exposed to the network.
+- No API tokens are consumed. All communication is local: AI client ↔ MCP server ↔ Foundry browser.
 
 ## License
 
