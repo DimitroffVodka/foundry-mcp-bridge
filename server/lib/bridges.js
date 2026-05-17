@@ -30,8 +30,12 @@ const pendingHello            = new WeakMap();// socket → setTimeout id
  *
  * @param {string|undefined} targetUser
  *   - undefined / "GM" / "self" → first GM bridge (single-GM constraint)
- *   - any other string → bridge whose userName matches exactly
- * @returns {{socket: WebSocket, userId: string, userName: string, isGM: boolean, connectedAt: number}}
+ *   - "<userName>"              → bridge whose userName matches exactly
+ *   - "<userName>@<host>"       → disambiguator when two bridges share a name
+ *                                 (matches the `host` reported in the hello
+ *                                 frame, e.g. "Gamemaster@foundry.example.com")
+ *   - "<userId>"                → bridge whose userId matches exactly
+ * @returns {{socket: WebSocket, userId: string, userName: string, isGM: boolean, host: string, connectedAt: number}}
  * @throws if no matching bridge is connected
  */
 export function routeBridge(targetUser) {
@@ -46,20 +50,25 @@ export function routeBridge(targetUser) {
     if (legacy?.isGM) return legacy;
     throw new Error("No GM bridge connected.");
   }
+  // 1. Exact userName match (back-compat, most common).
+  // 2. "userName@host" disambiguator.
+  // 3. Exact userId match (unambiguous escape hatch).
   for (const b of bridges.values()) {
-    if (b.userId === "__legacy__") continue;  // internal key, not addressable by name
+    if (b.userId === "__legacy__") continue;
     if (b.userName === targetUser) return b;
+    if (b.host && `${b.userName}@${b.host}` === targetUser) return b;
+    if (b.userId === targetUser) return b;
   }
   const known = [...bridges.values()]
     .filter(b => b.userId !== "__legacy__")
-    .map(b => b.userName)
+    .map(b => b.host ? `${b.userName}@${b.host}` : b.userName)
     .join(", ");
   const hasLegacy = bridges.has("__legacy__");
   const suffix = hasLegacy
     ? " (a legacy bridge is also connected — upgrade the bridge module to address it by name)"
     : "";
   throw new Error(
-    `No bridge connected for user "${targetUser}". Connected: ${known || "(none)"}.${suffix}`
+    `No bridge connected for "${targetUser}". Connected: ${known || "(none)"}.${suffix}`
   );
 }
 
@@ -111,20 +120,33 @@ export function startBridgeServer() {
           return;
         }
 
-        const { userId, userName, isGM } = msg;
+        const { userId, userName, isGM, host } = msg;
         if (!userId || !userName) {
           log(`Bridge sent malformed hello, ignoring: ${JSON.stringify(msg)}`);
           return;
         }
+
+        // If this socket was already legacy-registered because hello arrived
+        // after the deadline, evict the legacy entry — the real identity
+        // supersedes it. (Fixes the "legacyBridgeConnected: true" cosmetic
+        // bug where the stale entry stuck around after the real hello.)
+        const legacy = bridges.get("__legacy__");
+        if (legacy && legacy.socket === socket) {
+          bridges.delete("__legacy__");
+          log("Bridge promoted from legacy → identified");
+        }
+
         const bridge = {
           socket,
           userId,
           userName,
           isGM: !!isGM,
+          host: host || "",
           connectedAt: Date.now(),
         };
         bridges.set(userId, bridge);
-        log(`Bridge registered: ${userName} (${userId}) [${isGM ? "GM" : "player"}]`);
+        const hostStr = host ? ` @ ${host}` : "";
+        log(`Bridge registered: ${userName}${hostStr} (${userId}) [${isGM ? "GM" : "player"}]`);
 
         // If reload_foundry (or anyone else) is waiting for this user to
         // (re)connect, resolve their promise.

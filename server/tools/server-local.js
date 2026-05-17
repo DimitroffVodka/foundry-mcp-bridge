@@ -14,9 +14,10 @@ import { registerRawTool }                  from "./_helpers.js";
 export function registerServerLocalTools(mcp) {
   registerRawTool(mcp, "list_connected_bridges",
     "List all Foundry users currently connected via the bridge module. "
-    + "Use the `userName` field as the `targetUser` parameter on other "
-    + "tools to route calls to a specific player. The GM is the default "
-    + "target and need not be specified.",
+    + "Use `userName` (or `userName@host` to disambiguate when the same "
+    + "name is connected from two worlds) as the `targetUser` parameter "
+    + "on other tools to route calls. `userId` also works as an "
+    + "unambiguous escape hatch. The GM is the default target.",
     {},
     async () => {
       const list = [...bridges.values()]
@@ -24,6 +25,7 @@ export function registerServerLocalTools(mcp) {
         .map(b => ({
           userId:      b.userId,
           userName:    b.userName,
+          host:        b.host || "",
           isGM:        b.isGM,
           connectedAt: new Date(b.connectedAt).toISOString(),
         }))
@@ -31,6 +33,16 @@ export function registerServerLocalTools(mcp) {
           if (a.isGM !== b.isGM) return a.isGM ? -1 : 1;
           return a.userName.localeCompare(b.userName);
         });
+
+      // Surface the targetable string per bridge: the bare userName if it
+      // is unique across connected bridges, otherwise "userName@host".
+      const nameCounts = new Map();
+      for (const b of list) nameCounts.set(b.userName, (nameCounts.get(b.userName) ?? 0) + 1);
+      for (const b of list) {
+        b.targetUser = (nameCounts.get(b.userName) > 1 && b.host)
+          ? `${b.userName}@${b.host}`
+          : b.userName;
+      }
 
       const result = { bridges: list };
       if (bridges.has("__legacy__")) {

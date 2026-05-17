@@ -1810,6 +1810,10 @@ function connect() {
       userId:   game.user.id,
       userName: game.user.name,
       isGM:     game.user.isGM,
+      // Origin host (e.g., "localhost:30000", "foundry.example.com").
+      // Lets the server disambiguate two GMs with the same userName
+      // by exposing routing keys like "Gamemaster@foundry.example.com".
+      host:     (typeof window !== "undefined" && window.location?.host) || "",
     };
     try {
       const t = localStorage.getItem("mcpBridgeToken");

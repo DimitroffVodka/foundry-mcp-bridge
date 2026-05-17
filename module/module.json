@@ -2,7 +2,7 @@
   "id": "foundry-mcp-bridge",
   "title": "Foundry MCP Bridge",
   "description": "Exposes live Foundry VTT game state to Claude Desktop via a local WebSocket bridge for MCP integration.",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "compatibility": {
     "minimum": "12",
     "verified": "14"
