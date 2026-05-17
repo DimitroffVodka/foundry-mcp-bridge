@@ -2,7 +2,7 @@
 
 Connect any MCP-compatible AI client (Claude Desktop, Claude Code, Codex CLI, Gemini CLI) directly to a running Foundry VTT instance. Get live access to actors, compendiums, modules, console errors, and the full game API — no copy-pasting data, no API tokens.
 
-> The Foundry module id is `foundry-mcp-live`. The GitHub repo is named `foundry-mcp-bridge` for historical reasons; both refer to the same project. The id was renamed in v0.7.0 to avoid a collision with an unrelated module in Foundry's package directory.
+> Released as `foundry-mcp-live` (the Foundry module id and the GitHub repo name match). The id was renamed in v0.7.0 to avoid a collision with an unrelated module in Foundry's package directory; v0.7.1 renamed the repo to match.
 
 ## Architecture
 
@@ -26,7 +26,7 @@ Connect any MCP-compatible AI client (Claude Desktop, Claude Code, Codex CLI, Ge
 ## Repo layout
 
 ```
-foundry-mcp-bridge/
+foundry-mcp-live/
 ├── module/    ← Foundry VTT module (copy/symlink into Foundry's modules dir)
 └── server/    ← Node.js MCP server (run locally with npm start)
 ```
@@ -36,8 +36,8 @@ foundry-mcp-bridge/
 ### 1. Clone and install
 
 ```bash
-git clone https://github.com/DimitroffVodka/foundry-mcp-bridge.git
-cd foundry-mcp-bridge/server
+git clone https://github.com/DimitroffVodka/foundry-mcp-live.git
+cd foundry-mcp-live/server
 npm install
 ```
 
@@ -46,7 +46,7 @@ npm install
 In Foundry: **Add-on Modules → Install Module** → paste this manifest URL:
 
 ```
-https://github.com/DimitroffVodka/foundry-mcp-bridge/releases/latest/download/module.json
+https://github.com/DimitroffVodka/foundry-mcp-live/releases/latest/download/module.json
 ```
 
 Foundry downloads and installs it like any other module. Activate it in your world's Module Management.
@@ -93,7 +93,7 @@ Edit `%APPDATA%\Claude\claude_desktop_config.json` (Windows) or `~/Library/Appli
   "mcpServers": {
     "foundry-vtt": {
       "command": "node",
-      "args": ["C:\\path\\to\\foundry-mcp-bridge\\server\\proxy.mjs"]
+      "args": ["C:\\path\\to\\foundry-mcp-live\\server\\proxy.mjs"]
     }
   }
 }
