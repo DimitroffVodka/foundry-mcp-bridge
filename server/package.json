@@ -1,0 +1,14 @@
+{
+  "name": "foundry-mcp-server",
+  "version": "0.3.0",
+  "description": "MCP server bridging Claude Desktop to a live Foundry VTT instance via WebSocket",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "ws": "^8.18.0"
+  }
+}

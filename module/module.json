@@ -1,0 +1,23 @@
+{
+  "id": "foundry-mcp-bridge",
+  "title": "Foundry MCP Bridge",
+  "description": "Exposes live Foundry VTT game state to Claude Desktop via a local WebSocket bridge for MCP integration.",
+  "version": "0.5.1",
+  "compatibility": {
+    "minimum": "12",
+    "verified": "14"
+  },
+  "authors": [
+    {
+      "name": "DimitroffVodka"
+    }
+  ],
+  "esmodules": [
+    "scripts/bridge.js"
+  ],
+  "socket": false,
+  "url": "https://github.com/DimitroffVodka/foundry-mcp-bridge",
+  "manifest": "https://raw.githubusercontent.com/DimitroffVodka/foundry-mcp-bridge/main/module/module.json",
+  "download": "https://github.com/DimitroffVodka/foundry-mcp-bridge/releases/latest/download/module.zip",
+  "license": "MIT"
+}
