@@ -48,7 +48,7 @@ export function registerServerLocalTools(mcp) {
       if (bridges.has("__legacy__")) {
         result.legacyBridgeConnected = true;
         result.note = "A pre-multi-user bridge is connected and is being treated as the default GM. "
-          + "Update the foundry-mcp-bridge module so it identifies itself for direct addressing.";
+          + "Update the foundry-mcp-live module so it identifies itself for direct addressing.";
       }
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     });
@@ -83,7 +83,7 @@ export function registerServerLocalTools(mcp) {
       if (bridge.userId === "__legacy__") {
         return { content: [{ type: "text", text:
           "Error: reload_foundry requires a multi-user-aware bridge "
-          + "(foundry-mcp-bridge v0.2.0+). The targeted bridge appears to "
+          + "(foundry-mcp-live v0.2.0+). The targeted bridge appears to "
           + "be a legacy install. Upgrade the bridge module, or run "
           + "`evaluate({expression: \"window.location.reload()\"})` manually "
           + "and reconnect Claude Code on your own."

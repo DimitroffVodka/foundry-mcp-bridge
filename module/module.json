@@ -1,8 +1,8 @@
 {
-  "id": "foundry-mcp-bridge",
-  "title": "Foundry MCP Bridge",
-  "description": "Exposes live Foundry VTT game state to Claude Desktop via a local WebSocket bridge for MCP integration.",
-  "version": "0.6.2",
+  "id": "foundry-mcp-live",
+  "title": "Foundry MCP Live",
+  "description": "Live WebSocket bridge between Foundry VTT and MCP-compatible AI clients (Claude Desktop, Claude Code, Codex CLI, Gemini CLI). Exposes the running game state — actors, compendiums, console, scene — for real-time tool calls.",
+  "version": "0.7.0",
   "compatibility": {
     "minimum": "12",
     "verified": "14"

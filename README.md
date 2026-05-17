@@ -1,6 +1,8 @@
-# Foundry MCP Bridge
+# Foundry MCP Live
 
 Connect any MCP-compatible AI client (Claude Desktop, Claude Code, Codex CLI, Gemini CLI) directly to a running Foundry VTT instance. Get live access to actors, compendiums, modules, console errors, and the full game API — no copy-pasting data, no API tokens.
+
+> The Foundry module id is `foundry-mcp-live`. The GitHub repo is named `foundry-mcp-bridge` for historical reasons; both refer to the same project. The id was renamed in v0.7.0 to avoid a collision with an unrelated module in Foundry's package directory.
 
 ## Architecture
 
@@ -52,11 +54,11 @@ Foundry downloads and installs it like any other module. Activate it in your wor
 <details>
 <summary>Manual install (if you can't use the manifest URL)</summary>
 
-Copy or symlink the `module/` folder from this repo into your Foundry modules directory, renaming it to `foundry-mcp-bridge`:
+Copy or symlink the `module/` folder from this repo into your Foundry modules directory, renaming it to `foundry-mcp-live`:
 
-- **Windows:** `%localappdata%\FoundryVTT\Data\modules\foundry-mcp-bridge`
-- **Linux:** `/home/foundry/foundrydata/Data/modules/foundry-mcp-bridge`
-- **macOS:** `~/Library/Application Support/FoundryVTT/Data/modules/foundry-mcp-bridge`
+- **Windows:** `%localappdata%\FoundryVTT\Data\modules\foundry-mcp-live`
+- **Linux:** `/home/foundry/foundrydata/Data/modules/foundry-mcp-live`
+- **macOS:** `~/Library/Application Support/FoundryVTT/Data/modules/foundry-mcp-live`
 
 </details>
 

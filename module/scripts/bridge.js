@@ -1,5 +1,5 @@
 /**
- * Foundry MCP Bridge — Client Module
+ * Foundry MCP Live — Client Module
  *
  * Runs inside Foundry VTT (browser context). Connects via WebSocket to the
  * local MCP server and responds to tool requests with live game state data.
@@ -8,7 +8,7 @@
  * This means the MCP server must be running before Foundry connects.
  */
 
-const MODULE_ID = "foundry-mcp-bridge";
+const MODULE_ID = "foundry-mcp-live";
 const WS_URL = "ws://localhost:3001";
 const RECONNECT_DELAY = 5000;
 const MAX_ERRORS = 1000;
@@ -938,7 +938,7 @@ const handlers = {
     let h2c = globalThis._mcp_html2canvas;
     if (!h2c) {
       try {
-        const mod = await import("/modules/foundry-mcp-bridge/lib/html2canvas.esm.js");
+        const mod = await import("/modules/foundry-mcp-live/lib/html2canvas.esm.js");
         h2c = mod.default || mod;
         globalThis._mcp_html2canvas = h2c;
       } catch (err) {

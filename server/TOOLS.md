@@ -37,7 +37,7 @@ Liveness check + environment snapshot. Use this first to confirm the bridge is r
   - `foundryVersion` — e.g. `"13.351"`. Use this to branch logic that differs across Foundry major versions.
   - `users` — `[{ name, role, active }]`. `role` is an integer: 0=None, 1=Player, 2=Trusted, 3=Assistant, 4=Gamemaster. `active: true` means connected right now.
 
-  Note: `users` lists everyone logged in to Foundry, whether or not they have the `foundry-mcp-bridge` module connected. For the list of users actually reachable as a `targetUser`, use `list_connected_bridges`.
+  Note: `users` lists everyone logged in to Foundry, whether or not they have the `foundry-mcp-live` module connected. For the list of users actually reachable as a `targetUser`, use `list_connected_bridges`.
 
 ---
 
