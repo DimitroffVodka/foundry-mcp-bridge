@@ -5,16 +5,16 @@ Connect any MCP-compatible AI client (Claude Desktop, Claude Code, Codex CLI, Ge
 ## Architecture
 
 ```
-                          ┌─ Claude Desktop ─(stdio)─┐
-                          │                          │
-                          ├─ Claude Code ────(stdio)─┤
-                          │                          ├──► proxy.mjs ──┐
-                          │                          │                │
-   Foundry browser ◄─(WS:3001)──► MCP Server ◄──(HTTP:3000/mcp)───────┤
-                                                                       │
-                          ┌─ Codex CLI ──────(HTTP)──────────────────►┤
-                          │                                            │
-                          └─ Gemini CLI ─────(HTTP)──────────────────►┘
+                          Claude Desktop ─(stdio)─► proxy.mjs ──┐
+                                                                │
+                          Claude Code  ─────(HTTP)─────────────►│
+                                                                ├──► MCP Server
+                          Codex CLI    ─────(HTTP)─────────────►│  (HTTP:3000)
+                                                                │      │
+                          Gemini CLI   ─────(HTTP)─────────────►┘      │
+                                                                       ▼
+                                                              ◄─(WS:3001)─►
+                                                              Foundry browser
 ```
 
 - **MCP Server** (`server/server.js`, Node.js) — Runs locally on `http://127.0.0.1:3000/mcp` (MCP HTTP transport) and `ws://127.0.0.1:3001` (Foundry bridge). Must be started manually and kept running.
@@ -90,11 +90,15 @@ Use the **absolute path** to `proxy.mjs`. Restart Claude Desktop.
 
 #### Claude Code
 
+Claude Code supports HTTP MCP natively, so no proxy is needed:
+
 ```bash
-claude mcp add foundry-vtt -- node /absolute/path/to/foundry-mcp-bridge/server/proxy.mjs
+claude mcp add --transport http foundry-vtt http://127.0.0.1:3000/mcp
 ```
 
-Or edit `~/.claude.json` directly with the same `mcpServers` shape as Claude Desktop.
+Confirm with `claude mcp list` — should show `foundry-vtt: http://127.0.0.1:3000/mcp (HTTP) - ✓ Connected`.
+
+(Stdio fallback via `proxy.mjs` also works if you prefer: `claude mcp add foundry-vtt -- node /absolute/path/to/server/proxy.mjs`.)
 
 #### Codex CLI
 

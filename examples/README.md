@@ -8,4 +8,4 @@ Ready-to-paste config snippets for each MCP-compatible client. The MCP server mu
 | [`codex-config.toml`](codex-config.toml) | Codex CLI | Append to `~/.codex/config.toml`. |
 | [`gemini-settings.json`](gemini-settings.json) | Gemini CLI | Place at `<your-project>/.gemini/settings.json` for project-level wiring. |
 
-For Claude Code, use `claude mcp add foundry-vtt -- node /absolute/path/to/server/proxy.mjs` — same proxy.mjs as Claude Desktop.
+For Claude Code, use HTTP directly: `claude mcp add --transport http foundry-vtt http://127.0.0.1:3000/mcp`. (Stdio via `proxy.mjs` also works if you prefer.)
