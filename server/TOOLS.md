@@ -44,13 +44,16 @@ Liveness check + environment snapshot. Use this first to confirm the bridge is r
 ## Bridge discovery
 
 ### `list_connected_bridges`
-List all Foundry users currently connected via the bridge module. Use the `userName` field as the `targetUser` parameter on other tools to route calls to a specific player. The GM is the default target and need not be specified.
+List all Foundry users currently connected via the bridge module. Use the `targetUser` field directly as the `targetUser` parameter on other tools — it already handles host disambiguation when the same user name is connected from multiple worlds. The GM is the default target and need not be specified.
 
 This is a **server-local** tool — it doesn't proxy through any bridge — so it works even when no bridges are connected (returns empty list).
 
 - **Params**: none
 - **Returns**:
-  - `bridges` — array of `{ userId, userName, isGM, connectedAt }`, sorted GM-first then alphabetical by `userName`.
+  - `bridges` — array of `{ userId, userName, host, isGM, connectedAt, targetUser }`, sorted GM-first then alphabetical by `userName`.
+    - `userName` — Foundry user name (e.g. `"Gamemaster"`).
+    - `host` — the Foundry server this bridge came from (e.g. `"localhost:30000"`, `"shadowfoundry.online"`).
+    - `targetUser` — the canonical routing value to pass to other tools. Equal to `userName` when unambiguous, or `userName@host` when the same name is connected from multiple worlds. `userId` is also accepted as an unambiguous escape hatch.
   - `legacyBridgeConnected` — `true` if a pre-multi-user bridge is also attached (only present when applicable). Indicates the user should upgrade their bridge module to address it by name.
   - `note` — when `legacyBridgeConnected` is set, a human-readable explanation.
 
