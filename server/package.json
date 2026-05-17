@@ -1,6 +1,6 @@
 {
   "name": "foundry-mcp-server",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "description": "MCP server bridging Claude Desktop to a live Foundry VTT instance via WebSocket",
   "type": "module",
   "main": "server.js",
