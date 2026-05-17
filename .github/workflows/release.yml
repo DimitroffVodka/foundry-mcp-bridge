@@ -1,0 +1,39 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify tag matches module.json version
+        run: |
+          MODULE_VERSION=$(jq -r .version module/module.json)
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          if [ "$MODULE_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::Tag $TAG_VERSION does not match module.json version $MODULE_VERSION"
+            exit 1
+          fi
+
+      - name: Build module.zip
+        run: |
+          cd module
+          zip -r ../module.zip module.json scripts
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            module/module.json \
+            module.zip

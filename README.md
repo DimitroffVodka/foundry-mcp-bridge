@@ -41,13 +41,24 @@ npm install
 
 ### 2. Install the Foundry module
 
-Copy or symlink the `module/` folder into your Foundry modules directory, renaming it to `foundry-mcp-bridge`:
+In Foundry: **Add-on Modules → Install Module** → paste this manifest URL:
 
-**Windows:** `%localappdata%\FoundryVTT\Data\modules\foundry-mcp-bridge`
-**Linux:** `/home/foundry/foundrydata/Data/modules/foundry-mcp-bridge`
-**macOS:** `~/Library/Application Support/FoundryVTT/Data/modules/foundry-mcp-bridge`
+```
+https://github.com/DimitroffVodka/foundry-mcp-bridge/releases/latest/download/module.json
+```
 
-Activate the module in your world's Module Management settings.
+Foundry downloads and installs it like any other module. Activate it in your world's Module Management.
+
+<details>
+<summary>Manual install (if you can't use the manifest URL)</summary>
+
+Copy or symlink the `module/` folder from this repo into your Foundry modules directory, renaming it to `foundry-mcp-bridge`:
+
+- **Windows:** `%localappdata%\FoundryVTT\Data\modules\foundry-mcp-bridge`
+- **Linux:** `/home/foundry/foundrydata/Data/modules/foundry-mcp-bridge`
+- **macOS:** `~/Library/Application Support/FoundryVTT/Data/modules/foundry-mcp-bridge`
+
+</details>
 
 ### 3. Start the MCP server
 
@@ -218,6 +229,12 @@ You should get a 200 with an `mcp-session-id` header.
 - The `evaluate` tool runs arbitrary JS in the Foundry client context. It's the most powerful tool and the most dangerous.
 - Both ports bind to `127.0.0.1` only — not exposed to the network.
 - No API tokens are consumed. All communication is local: AI client ↔ MCP server ↔ Foundry browser.
+
+## Releasing a new version
+
+1. Bump `version` in [module/module.json](module/module.json) and [server/package.json](server/package.json).
+2. Commit, then tag and push: `git tag v0.5.2 && git push --tags`.
+3. The [release workflow](.github/workflows/release.yml) builds `module.zip` and publishes a GitHub Release with `module.json` + `module.zip` attached. The manifest URL `releases/latest/download/module.json` then points at the new version automatically, so Foundry's update check picks it up.
 
 ## License
 
