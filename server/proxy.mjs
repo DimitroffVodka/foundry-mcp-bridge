@@ -16,7 +16,8 @@ import { StdioServerTransport }            from "@modelcontextprotocol/sdk/serve
 import { CallToolRequestSchema,
          ListToolsRequestSchema }          from "@modelcontextprotocol/sdk/types.js";
 
-const HTTP_URL = process.env.FOUNDRY_MCP_URL ?? "http://127.0.0.1:3000/mcp";
+const HTTP_URL    = process.env.FOUNDRY_MCP_URL ?? "http://127.0.0.1:3000/mcp";
+const AUTH_TOKEN  = process.env.BRIDGE_TOKEN ?? "";
 
 async function main() {
   // ── Connect to the HTTP server as a client ────────────────────────────────
@@ -25,8 +26,14 @@ async function main() {
     { capabilities: { tools: {} } }
   );
 
+  // Forward BRIDGE_TOKEN as Authorization: Bearer if set, so this proxy
+  // works against a server that has auth enabled.
+  const transportOpts = AUTH_TOKEN
+    ? { requestInit: { headers: { Authorization: `Bearer ${AUTH_TOKEN}` } } }
+    : undefined;
+
   try {
-    await client.connect(new StreamableHTTPClientTransport(new URL(HTTP_URL)));
+    await client.connect(new StreamableHTTPClientTransport(new URL(HTTP_URL), transportOpts));
   } catch (err) {
     process.stderr.write(
       `[foundry-proxy] Cannot reach HTTP server at ${HTTP_URL}\n` +

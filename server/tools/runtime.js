@@ -5,6 +5,7 @@
  */
 import { z }                  from "zod";
 import { registerRoutedTool } from "./_helpers.js";
+import { ALLOW_EVAL }          from "../lib/config.js";
 
 export function registerRuntimeTools(mcp) {
   // --- Console errors ---
@@ -18,27 +19,29 @@ export function registerRuntimeTools(mcp) {
       level:   z.enum(["error", "warn"]).optional().describe("Filter by level."),
     });
 
-  // --- Evaluate ---
-  registerRoutedTool(mcp, "evaluate",
-    "Evaluate arbitrary JavaScript in the live Foundry VTT context. "
-    + "Has access to `game`, `canvas`, and `ui` globals. "
-    + "Write the body of an async function; `return` to send data back; "
-    + "`await` works.\n\n"
-    + "Gotchas:\n"
-    + "• Returns are JSON-stringified — Foundry document objects (Actor, "
-    + "Item, ChatMessage, etc.) serialize as `{}`. Wrap them in `.toObject()` "
-    + "or pull specific fields explicitly.\n"
-    + "• Map / Set / DOM nodes / functions silently drop. Convert to plain "
-    + "structures: `[...map.entries()]`, `[...set]`, `el.outerHTML`, etc.\n"
-    + "• To inspect a tool/object surface, enumerate explicitly: "
-    + "`Object.keys(obj).map(k => ({ k, t: typeof obj[k] }))`.\n"
-    + "• Response includes `evalMs` so you can tell whether a slow call is "
-    + "the bridge or your code.",
-    {
-      expression: z.string().describe(
-        "JS to evaluate (body of an async function with game/canvas/ui in scope)."
-      ),
-    });
+  // --- Evaluate (opt-in: requires FOUNDRY_MCP_ALLOW_EVAL=1) ---
+  if (ALLOW_EVAL) {
+    registerRoutedTool(mcp, "evaluate",
+      "Evaluate arbitrary JavaScript in the live Foundry VTT context. "
+      + "Has access to `game`, `canvas`, and `ui` globals. "
+      + "Write the body of an async function; `return` to send data back; "
+      + "`await` works.\n\n"
+      + "Gotchas:\n"
+      + "• Returns are JSON-stringified — Foundry document objects (Actor, "
+      + "Item, ChatMessage, etc.) serialize as `{}`. Wrap them in `.toObject()` "
+      + "or pull specific fields explicitly.\n"
+      + "• Map / Set / DOM nodes / functions silently drop. Convert to plain "
+      + "structures: `[...map.entries()]`, `[...set]`, `el.outerHTML`, etc.\n"
+      + "• To inspect a tool/object surface, enumerate explicitly: "
+      + "`Object.keys(obj).map(k => ({ k, t: typeof obj[k] }))`.\n"
+      + "• Response includes `evalMs` so you can tell whether a slow call is "
+      + "the bridge or your code.",
+      {
+        expression: z.string().describe(
+          "JS to evaluate (body of an async function with game/canvas/ui in scope)."
+        ),
+      });
+  }
 
   // --- DOM interaction ---
   registerRoutedTool(mcp, "click",

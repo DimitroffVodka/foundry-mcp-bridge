@@ -17,7 +17,7 @@
  * installs keep working until they're upgraded.
  */
 import { WebSocketServer } from "ws";
-import { WS_PORT, HELLO_DEADLINE_MS } from "./config.js";
+import { WS_PORT, HELLO_DEADLINE_MS, BRIDGE_TOKEN } from "./config.js";
 import { log }                        from "./log.js";
 import { pendingRequests }            from "./foundry-rpc.js";
 
@@ -76,9 +76,15 @@ export function startBridgeServer() {
 
     // Schedule a deadline for the `hello` frame. If it doesn't arrive, the
     // bridge is from a pre-multi-user version — register as legacy GM so it
-    // still works.
+    // still works (only when no BRIDGE_TOKEN is set; otherwise legacy
+    // fallback bypasses auth so we close the socket instead).
     const helloTimer = setTimeout(() => {
       pendingHello.delete(socket);
+      if (BRIDGE_TOKEN) {
+        log("Bridge missed hello and BRIDGE_TOKEN is set — closing socket");
+        socket.close(1008, "auth required");
+        return;
+      }
       bridges.set("__legacy__", {
         socket,
         userId:      "__legacy__",
@@ -98,6 +104,12 @@ export function startBridgeServer() {
       if (msg.type === "hello") {
         const t = pendingHello.get(socket);
         if (t) { clearTimeout(t); pendingHello.delete(socket); }
+
+        if (BRIDGE_TOKEN && msg.token !== BRIDGE_TOKEN) {
+          log(`Bridge hello rejected: invalid or missing token`);
+          socket.close(1008, "auth failed");
+          return;
+        }
 
         const { userId, userName, isGM } = msg;
         if (!userId || !userName) {

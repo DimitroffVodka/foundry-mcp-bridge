@@ -221,14 +221,17 @@ You should get a 200 with an `mcp-session-id` header.
 | `FOUNDRY_WS_PORT` | `3001` | WebSocket port the Foundry module connects to |
 | `FOUNDRY_MCP_PORT` | `3000` | HTTP port MCP clients connect to |
 | `FOUNDRY_MCP_URL` | `http://127.0.0.1:3000/mcp` | Used by `proxy.mjs` to find the HTTP server |
+| `FOUNDRY_MCP_ALLOW_EVAL` | `0` | Set to `1` to enable the `evaluate` tool (arbitrary JS in Foundry context). See [SECURITY.md](SECURITY.md). |
+| `BRIDGE_TOKEN` | (unset) | Shared secret. If set, all MCP HTTP requests must send `Authorization: Bearer <token>` and the Foundry module must store the same value in `localStorage.mcpBridgeToken`. See [SECURITY.md](SECURITY.md). |
 
 ## Notes
 
 - The WebSocket connection auto-reconnects every 5 seconds if Foundry is reloaded. The hello frame is re-sent each time.
 - Console error capture starts when the module loads — errors before the `ready` hook are missed.
-- The `evaluate` tool runs arbitrary JS in the Foundry client context. It's the most powerful tool and the most dangerous.
+- The `evaluate` tool runs arbitrary JS in the Foundry client context — disabled by default. Enable with `FOUNDRY_MCP_ALLOW_EVAL=1`.
 - Both ports bind to `127.0.0.1` only — not exposed to the network.
-- No API tokens are consumed. All communication is local: AI client ↔ MCP server ↔ Foundry browser.
+- No API tokens are consumed by the AI clients. All communication is local: AI client ↔ MCP server ↔ Foundry browser.
+- See [SECURITY.md](SECURITY.md) for the threat model and opt-in auth.
 
 ## Releasing a new version
 

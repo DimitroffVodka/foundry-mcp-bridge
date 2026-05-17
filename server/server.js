@@ -10,8 +10,10 @@
  * up and owns the HTTP/MCP transport bookkeeping.
  *
  * Environment variables:
- *   FOUNDRY_WS_PORT   – WebSocket port for Foundry bridge  (default: 3001)
- *   FOUNDRY_MCP_PORT  – HTTP port for MCP clients          (default: 3000)
+ *   FOUNDRY_WS_PORT           – WebSocket port for Foundry bridge  (default: 3001)
+ *   FOUNDRY_MCP_PORT          – HTTP port for MCP clients          (default: 3000)
+ *   BRIDGE_TOKEN              – If set, required for HTTP + WS connections
+ *   FOUNDRY_MCP_ALLOW_EVAL    – "1" enables the `evaluate` tool (off by default)
  */
 
 import { McpServer }                      from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -20,7 +22,7 @@ import { createMcpExpressApp }            from "@modelcontextprotocol/sdk/server
 import { randomUUID }                     from "crypto";
 
 import { log }                            from "./lib/log.js";
-import { HTTP_PORT }                      from "./lib/config.js";
+import { HTTP_PORT, BRIDGE_TOKEN, ALLOW_EVAL } from "./lib/config.js";
 import { startBridgeServer }              from "./lib/bridges.js";
 import { startHotReloadWatcher }          from "./lib/hot-reload.js";
 import { registerTools }                  from "./tools/index.js";
@@ -45,6 +47,52 @@ const sessions = new Map(); // sessionId → { transport, mcp }
 startHotReloadWatcher(() => [...sessions.values()].map(s => s.mcp));
 
 const app = createMcpExpressApp();
+
+// CORS lockdown — reject any cross-origin browser request. CLI clients
+// (Codex, Gemini, Claude Code stdio proxy) send no `Origin` header and are
+// unaffected. A malicious site visited in another tab CAN'T POST JSON with
+// a custom Content-Type without a preflight, but defense-in-depth: reject
+// preflights too, and reject any explicit Origin that isn't a loopback.
+const LOOPBACK_ORIGIN = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i;
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  if (origin && !LOOPBACK_ORIGIN.test(origin)) {
+    res.status(403).json({ error: `Origin not allowed: ${origin}` });
+    return;
+  }
+  // Reflect the localhost origin if present, otherwise no CORS headers
+  // (and therefore no cross-origin access).
+  if (origin) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Vary", "Origin");
+  }
+  if (req.method === "OPTIONS") {
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, mcp-session-id");
+    res.status(204).end();
+    return;
+  }
+  next();
+});
+
+// Optional token auth. When BRIDGE_TOKEN is unset, behave as before
+// (localhost trust). When set, require `Authorization: Bearer <token>`.
+if (BRIDGE_TOKEN) {
+  app.use("/mcp", (req, res, next) => {
+    const auth = req.headers.authorization ?? "";
+    const m = /^Bearer\s+(.+)$/i.exec(auth);
+    if (!m || m[1] !== BRIDGE_TOKEN) {
+      res.status(401).json({ error: "Invalid or missing bearer token" });
+      return;
+    }
+    next();
+  });
+  log("BRIDGE_TOKEN set — requiring Authorization: Bearer header on /mcp");
+}
+
+if (!ALLOW_EVAL) {
+  log("`evaluate` tool DISABLED (set FOUNDRY_MCP_ALLOW_EVAL=1 to enable).");
+}
 
 // Handle all MCP traffic (POST for messages, GET for SSE streams, DELETE to close)
 app.all("/mcp", async (req, res) => {
@@ -79,7 +127,7 @@ app.all("/mcp", async (req, res) => {
     }
   };
 
-  const mcp = new McpServer({ name: "foundry-vtt", version: "0.3.0" });
+  const mcp = new McpServer({ name: "foundry-vtt", version: "0.6.0" });
   await registerTools(mcp);
   await mcp.connect(transport);
   await transport.handleRequest(req, res, req.body);

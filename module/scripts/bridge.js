@@ -922,10 +922,11 @@ const handlers = {
 
   /**
    * Screenshot a DOM element (sheets, HUD, chat cards — anything the PIXI
-   * screenshot can't reach) via html2canvas, lazy-loaded from a CDN on first
-   * use and cached on window. Useful for UI diffing and comparing sheet
-   * layouts. Note: html2canvas approximates some CSS (3D transforms, shaders,
-   * cross-origin images without CORS headers may be blank).
+   * screenshot can't reach) via html2canvas, lazy-loaded from the module's
+   * vendored copy on first use and cached on window. Useful for UI diffing
+   * and comparing sheet layouts. Note: html2canvas approximates some CSS
+   * (3D transforms, shaders, cross-origin images without CORS headers may
+   * be blank).
    */
   screenshot_dom: async (params = {}) => {
     const selector = params.selector ?? "body";
@@ -937,11 +938,11 @@ const handlers = {
     let h2c = globalThis._mcp_html2canvas;
     if (!h2c) {
       try {
-        const mod = await import("https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.esm.js");
+        const mod = await import("/modules/foundry-mcp-bridge/lib/html2canvas.esm.js");
         h2c = mod.default || mod;
         globalThis._mcp_html2canvas = h2c;
       } catch (err) {
-        return { error: `Failed to load html2canvas from CDN: ${err.message}` };
+        return { error: `Failed to load vendored html2canvas: ${err.message}` };
       }
     }
 
@@ -1801,12 +1802,20 @@ function connect() {
     // to the right Foundry user. Server falls back to a legacy-GM
     // registration if this doesn't arrive within 500ms (backward compat
     // for older bridges that never sent a hello frame).
-    ws.send(JSON.stringify({
+    // If the server runs with BRIDGE_TOKEN set, the user must store the
+    // matching token in localStorage so we can echo it back here:
+    //   localStorage.setItem("mcpBridgeToken", "your-token")
+    const helloFrame = {
       type:     "hello",
       userId:   game.user.id,
       userName: game.user.name,
       isGM:     game.user.isGM,
-    }));
+    };
+    try {
+      const t = localStorage.getItem("mcpBridgeToken");
+      if (t) helloFrame.token = t;
+    } catch { /* ignore */ }
+    ws.send(JSON.stringify(helloFrame));
   });
 
   ws.addEventListener("message", async (event) => {
