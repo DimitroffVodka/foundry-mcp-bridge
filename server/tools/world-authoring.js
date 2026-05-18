@@ -411,4 +411,26 @@ export function registerWorldAuthoringTools(mcp) {
         multiplier: z.number().optional().describe("Multiplier (e.g. 0.5 for half)."),
       })).describe("Per-target damage descriptors."),
     });
+
+  // --- Place measured template (v0.11) ---
+  registerRoutedTool(mcp, "place_measured_template",
+    "Drop a MeasuredTemplate onto a scene (fireball circle, cone, wall ray, "
+    + "rectangle). Used for spell areas of effect. The template is created "
+    + "immediately at the given coordinates — no preview/place UX.",
+    {
+      type:      z.enum(["circle", "cone", "rect", "ray"]).optional().describe("Template shape. Default 'circle'."),
+      x:         z.number().describe("X pixel coordinate of the template origin."),
+      y:         z.number().describe("Y pixel coordinate of the template origin."),
+      distance:  z.number().describe("Template distance in grid units (e.g. 20 for a 20ft cone)."),
+      direction: z.number().optional().describe("Direction in degrees (for cone/ray). Default 0."),
+      angle:     z.number().optional().describe("Cone angle in degrees. Default 53 for cones, 0 otherwise."),
+      width:     z.number().optional().describe("Ray width (for type='ray'). Default 0."),
+      fillColor: z.string().optional().describe("Hex color for the template fill. Defaults to the user's color."),
+      texture:   z.string().optional().describe("Optional texture image path overlaying the template."),
+      flags:     z.record(z.string(), z.any()).optional().describe(
+        "Module flags to attach (e.g. { 'spell-effects': { name: 'fireball' } })."
+      ),
+      sceneId:   z.string().optional().describe("Target scene id. Default: active scene."),
+      hidden:    z.boolean().optional().describe("Create hidden to non-GMs. Default false."),
+    });
 }

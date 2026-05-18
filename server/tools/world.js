@@ -125,4 +125,39 @@ export function registerWorldTools(mcp) {
       includeRolls:    z.boolean().optional().describe("Include roll messages. Default true."),
       includeWhispers: z.boolean().optional().describe("Include whispers. Default false."),
     });
+
+  // --- Scene placeables (v0.11) ---
+  registerRoutedTool(mcp, "get_scene_placeables",
+    "List placeables of a given type on a scene. `get_scene` only returns "
+    + "tokens; this exposes the other embedded collections — templates, "
+    + "regions, walls, lights, sounds, drawings, notes, tiles — so the LLM "
+    + "can inspect them without falling back to `evaluate`. Returns full "
+    + "document data (via toObject()) for each item.",
+    {
+      type:    z.enum(["Token", "MeasuredTemplate", "Region", "Wall", "AmbientLight", "AmbientSound", "Drawing", "Note", "Tile"])
+                .optional().describe("Document type. Default 'Token'."),
+      sceneId: z.string().optional().describe("Target scene id. Default: active scene."),
+    });
+
+  // --- Settings (v0.11) ---
+  registerRoutedTool(mcp, "get_settings",
+    "Read Foundry settings. Three modes: "
+    + "(1) No args → catalog of every registered (namespace, key) pair "
+    + "without values. "
+    + "(2) `moduleId` only → all settings for that namespace with current values. "
+    + "(3) `moduleId` + `key` → just that one setting's value.",
+    {
+      moduleId: z.string().optional().describe("Module/system namespace (e.g. 'core', 'dnd5e', 'levels')."),
+      key:      z.string().optional().describe("Specific setting key within the namespace."),
+    });
+
+  // --- Focused actor item list (v0.11) ---
+  registerRoutedTool(mcp, "get_actor_items",
+    "Focused list of an actor's embedded items, optionally filtered by item "
+    + "type. Returns just `{id, name, type, img, system}` per item — much "
+    + "smaller payload than `get_actor` when you only need to pick one item.",
+    {
+      actorId: z.string().describe("Actor document id or exact name."),
+      type:    z.string().optional().describe("Filter by item type (e.g. 'weapon', 'spell', 'class')."),
+    });
 }

@@ -1876,8 +1876,12 @@ const handlers = {
     if (!params.updates || typeof params.updates !== "object") {
       return { error: "updates object is required" };
     }
-    // Whitelist top-level keys to avoid accidental destructive writes
-    const allowed = ["x", "y", "width", "height", "rotation", "hidden", "disposition", "name", "elevation", "lockRotation", "sort", "alpha", "tint"];
+    // Whitelist top-level keys to avoid accidental destructive writes.
+    // `flags` is included so module-specific data (e.g. Levels module's
+    // flags.levels.rangeTop/rangeBottom for elevation-aware scenes) can be
+    // set without falling back to evaluate. Foundry's document.update does a
+    // deep merge on flags, so existing module flags are preserved.
+    const allowed = ["x", "y", "width", "height", "rotation", "hidden", "disposition", "name", "elevation", "lockRotation", "sort", "alpha", "tint", "flags"];
     const updates = {};
     for (const k of allowed) if (k in params.updates) updates[k] = params.updates[k];
     if (Object.keys(updates).length === 0) {
@@ -3208,6 +3212,190 @@ const handlers = {
     }
 
     return { applied: appliedResults };
+  },
+
+  // -------------------------------------------------------------------------
+  // v0.11: Scene placeables, settings, actor-item focus, template placement.
+  // Reads aren't gated; place_measured_template is server-side gated behind
+  // ALLOW_WRITE.
+  // -------------------------------------------------------------------------
+
+  /**
+   * Return scene placeables of a given type. `get_scene` only returns Token
+   * data; this exposes the other embedded collections so the LLM can inspect
+   * templates, regions, walls, lights, drawings, and notes without an
+   * evaluate.
+   */
+  get_scene_placeables: (params = {}) => {
+    const { type = "Token", sceneId } = params;
+    const scene = sceneId ? game.scenes.get(sceneId) : game.scenes.active;
+    if (!scene) throw new Error(sceneId ? `Scene "${sceneId}" not found` : "No active scene");
+
+    // Map of accepted type → embedded-collection name on the Scene document.
+    const COLLECTIONS = {
+      Token:            "tokens",
+      MeasuredTemplate: "templates",
+      Region:           "regions",
+      Wall:             "walls",
+      AmbientLight:     "lights",
+      AmbientSound:     "sounds",
+      Drawing:          "drawings",
+      Note:             "notes",
+      Tile:             "tiles"
+    };
+    const key = COLLECTIONS[type];
+    if (!key) throw new Error(`Unsupported placeable type "${type}". Allowed: ${Object.keys(COLLECTIONS).join(", ")}`);
+
+    const collection = scene[key];
+    if (!collection) return { sceneId: scene.id, type, count: 0, items: [] };
+
+    const items = collection.contents.map(doc => doc.toObject());
+    return { sceneId: scene.id, sceneName: scene.name, type, count: items.length, items };
+  },
+
+  /**
+   * Read Foundry settings. With `moduleId` only → returns all registered
+   * settings for that module with their current values. With `moduleId` +
+   * `key` → returns just that one. With no args → returns a list of every
+   * registered (module, key) pair without values (catalog mode).
+   */
+  get_settings: (params = {}) => {
+    const { moduleId, key } = params;
+
+    // Catalog mode: list every registered setting.
+    if (!moduleId) {
+      const catalog = [];
+      for (const setting of game.settings.settings.values()) {
+        catalog.push({
+          namespace: setting.namespace,
+          key:       setting.key,
+          scope:     setting.scope,
+          type:      setting.type?.name ?? String(setting.type),
+          isMenu:    !!setting.menu
+        });
+      }
+      return { mode: "catalog", count: catalog.length, settings: catalog };
+    }
+
+    // Single-key mode.
+    if (key) {
+      try {
+        const value = game.settings.get(moduleId, key);
+        return { mode: "single", namespace: moduleId, key, value };
+      } catch (err) {
+        throw new Error(`Setting "${moduleId}.${key}" not registered or threw: ${err.message}`);
+      }
+    }
+
+    // Module-scoped mode: every setting whose namespace matches moduleId.
+    const matches = [];
+    for (const setting of game.settings.settings.values()) {
+      if (setting.namespace !== moduleId) continue;
+      let value;
+      try { value = game.settings.get(setting.namespace, setting.key); }
+      catch { value = "(error reading)"; }
+      matches.push({
+        namespace: setting.namespace,
+        key:       setting.key,
+        scope:     setting.scope,
+        value
+      });
+    }
+    return { mode: "module", namespace: moduleId, count: matches.length, settings: matches };
+  },
+
+  /**
+   * Focused list of an actor's embedded items. `get_actor` returns the full
+   * actor document (~60KB on D&D characters). This returns just the items
+   * with the fields most useful for picking one — name, id, type, img,
+   * system data summary — and supports filtering by item type.
+   */
+  get_actor_items: (params = {}) => {
+    const { actorId, type } = params;
+    if (!actorId) throw new Error("`actorId` is required");
+
+    const actor = game.actors.get(actorId) || game.actors.getName(actorId);
+    if (!actor) throw new Error(`Actor "${actorId}" not found`);
+
+    let items = actor.items.contents;
+    if (type) items = items.filter(it => it.type === type);
+
+    return {
+      actorId,
+      actorName: actor.name,
+      filter: type ?? null,
+      count: items.length,
+      items: items.map(it => ({
+        id:     it.id,
+        name:   it.name,
+        type:   it.type,
+        img:    it.img,
+        // System data tends to be the most relevant for picking an item;
+        // keep it but skip the document-level cruft.
+        system: it.system
+      }))
+    };
+  },
+
+  /**
+   * Drop a MeasuredTemplate onto a scene (default: active scene). Used for
+   * fireball-style area effects, walls of fire, etc. The bridge doesn't
+   * trigger any "preview/place" UX — the template appears immediately at
+   * the given coordinates with the configured fields.
+   */
+  place_measured_template: async (params = {}) => {
+    const {
+      type = "circle",        // "circle" | "cone" | "rect" | "ray"
+      x, y,
+      distance,               // grid distance (units)
+      direction,              // degrees, for cone/ray
+      angle,                  // degrees, for cone width
+      width,                  // for ray
+      fillColor,              // hex string
+      texture,                // image path
+      flags,                  // module flags (merge-deep)
+      sceneId,
+      hidden = false
+    } = params;
+
+    if (x == null || y == null) throw new Error("`x` and `y` (pixel coordinates) are required");
+    if (distance == null) throw new Error("`distance` (in grid units) is required");
+
+    const scene = sceneId ? game.scenes.get(sceneId) : game.scenes.active;
+    if (!scene) throw new Error(sceneId ? `Scene "${sceneId}" not found` : "No active scene");
+
+    const validTypes = ["circle", "cone", "rect", "ray"];
+    if (!validTypes.includes(type)) throw new Error(`Invalid type "${type}". Allowed: ${validTypes.join(", ")}`);
+
+    const data = {
+      t: type,
+      user: game.user.id,
+      x, y,
+      distance,
+      direction: direction ?? 0,
+      angle:     angle ?? (type === "cone" ? 53 : 0),
+      width:     width ?? 0,
+      fillColor: fillColor ?? game.user.color ?? "#FF0000",
+      hidden: !!hidden
+    };
+    if (texture) data.texture = texture;
+    if (flags && typeof flags === "object") data.flags = flags;
+
+    const [created] = await scene.createEmbeddedDocuments("MeasuredTemplate", [data]);
+    if (!created) throw new Error("MeasuredTemplate.create returned no document");
+
+    return {
+      id: created.id,
+      sceneId: scene.id,
+      type: created.t,
+      x: created.x,
+      y: created.y,
+      distance: created.distance,
+      direction: created.direction,
+      angle: created.angle,
+      width: created.width,
+      hidden: created.hidden
+    };
   }
 };
 
