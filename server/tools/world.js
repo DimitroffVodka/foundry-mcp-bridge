@@ -160,4 +160,19 @@ export function registerWorldTools(mcp) {
       actorId: z.string().describe("Actor document id or exact name."),
       type:    z.string().optional().describe("Filter by item type (e.g. 'weapon', 'spell', 'class')."),
     });
+
+  // --- Module API call (v0.11.1) ---
+  registerRoutedTool(mcp, "call_module_api",
+    "Call a function exposed on `game.modules.get(moduleId).api`. Allowlist-"
+    + "style alternative to `evaluate` — only functions a module deliberately "
+    + "puts on its `.api` surface are reachable. The module author chooses "
+    + "what's callable, so this avoids the arbitrary-code-execution surface "
+    + "of evaluate while still letting agents drive third-party integrations "
+    + "(shadowdark-extras dungeon generation, mythic-gme-tools fate questions, "
+    + "etc.). Args are passed positionally; result is JSON-serialised.",
+    {
+      moduleId: z.string().describe("Module ID (e.g. 'shadowdark-extras', 'mythic-gme-tools')."),
+      fn:       z.string().describe("Function name on `module.api`."),
+      args:     z.array(z.any()).optional().describe("Positional args. Default: []."),
+    });
 }

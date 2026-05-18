@@ -3396,6 +3396,45 @@ const handlers = {
       width: created.width,
       hidden: created.hidden
     };
+  },
+
+  /**
+   * Call a function exposed on `game.modules.get(moduleId).api`. This is the
+   * allowlist-style alternative to `evaluate` — only functions a module
+   * deliberately puts on its `.api` surface are reachable, so the security
+   * model is "module author chooses what's callable" rather than "LLM can
+   * run arbitrary code."
+   *
+   * Use this instead of `evaluate` when a module exposes structured helpers
+   * (e.g. shadowdark-extras' generateDungeon, mythic-gme-tools' fateQuestion).
+   * Args are passed positionally; the return is JSON-serialised.
+   */
+  call_module_api: async (params = {}) => {
+    const { moduleId, fn, args } = params;
+    if (!moduleId || !fn) throw new Error("`moduleId` and `fn` are required");
+
+    const mod = game.modules.get(moduleId);
+    if (!mod) throw new Error(`Module "${moduleId}" not installed`);
+    if (!mod.api) throw new Error(`Module "${moduleId}" has no .api surface — module author hasn't exposed callable functions`);
+
+    const target = mod.api[fn];
+    if (typeof target !== "function") {
+      const available = Object.keys(mod.api).filter(k => typeof mod.api[k] === "function").sort();
+      throw new Error(`${moduleId}.api.${fn} is not a function. Available: ${available.join(", ") || "(none)"}`);
+    }
+
+    const callArgs = Array.isArray(args) ? args : [];
+    const raw = await target(...callArgs);
+    // Foundry documents have a toObject(); other values are JSON-cloned for
+    // serialisation safety. null/undefined pass through cleanly.
+    let result;
+    if (raw == null) result = null;
+    else if (typeof raw?.toObject === "function") result = raw.toObject();
+    else {
+      try { result = JSON.parse(JSON.stringify(raw)); }
+      catch { result = String(raw); }
+    }
+    return { moduleId, fn, result };
   }
 };
 
