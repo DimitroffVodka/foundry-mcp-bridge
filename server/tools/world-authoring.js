@@ -412,6 +412,81 @@ export function registerWorldAuthoringTools(mcp) {
       })).describe("Per-target damage descriptors."),
     });
 
+  // --- Scene levels CRUD (v0.12.0) ---
+  registerRoutedTool(mcp, "add_scene_level",
+    "Add a level (floor) to a multi-level scene. v14 only — `scene.levels` "
+    + "is a v14-native EmbeddedCollection. Returns the created level's id, "
+    + "name, and elevation range.",
+    {
+      sceneId: z.string().describe("Target scene id."),
+      name:    z.string().describe("Level name (e.g. 'Ground', 'Upper', 'Basement')."),
+      bottom:  z.number().describe("Lower bound of the level's elevation range (in feet)."),
+      top:     z.number().describe("Upper bound of the level's elevation range (in feet)."),
+    });
+
+  registerRoutedTool(mcp, "update_scene_level",
+    "Update a level's name and/or elevation range. Provide whichever of "
+    + "`name`, `bottom`, `top` you want to change — the rest are preserved.",
+    {
+      sceneId: z.string().describe("Target scene id."),
+      levelId: z.string().describe("Level document id to update."),
+      name:    z.string().optional().describe("New level name."),
+      bottom:  z.number().optional().describe("New lower elevation bound."),
+      top:     z.number().optional().describe("New upper elevation bound."),
+    });
+
+  registerRoutedTool(mcp, "remove_scene_level",
+    "Delete a level from a scene. Refuses on the only remaining level — "
+    + "a scene must always have at least one. Permanent.",
+    {
+      sceneId: z.string().describe("Target scene id."),
+      levelId: z.string().describe("Level document id to delete."),
+    });
+
+  // --- Region CRUD (v0.12.0) ---
+  registerRoutedTool(mcp, "create_region",
+    "Create a Region (v13+) on a scene. Regions can have shapes, behaviors "
+    + "(scriptable triggers), and level memberships. Use `shapes` for the "
+    + "geometry, `behaviors` for the scriptable actions, `levels` to scope "
+    + "the region to specific floors. Use `list_region_behavior_types` for "
+    + "the schemas of every behavior subtype.",
+    {
+      sceneId:    z.string().describe("Target scene id."),
+      name:       z.string().describe("Region name."),
+      shapes:     z.array(z.record(z.string(), z.any())).describe(
+        "Non-empty array of RegionShape data (e.g. {type:'rectangle', x, y, width, height})."
+      ),
+      behaviors:  z.array(z.record(z.string(), z.any())).optional().describe(
+        "RegionBehavior data (e.g. {type:'executeScript', system:{source}})."
+      ),
+      levels:     z.array(z.string()).optional().describe("Level ids the region applies to."),
+      color:      z.string().optional().describe("Hex color for the region overlay."),
+      visibility: z.number().int().optional().describe("Visibility level (0–4 per Foundry's enum)."),
+      locked:     z.boolean().optional().describe("Lock the region from interactive selection."),
+      elevation:  z.record(z.string(), z.any()).optional().describe("Override elevation range {bottom, top}."),
+      ownership:  z.record(z.string(), z.any()).optional().describe("Per-user ownership map."),
+    });
+
+  registerRoutedTool(mcp, "update_region",
+    "Patch any field on an existing region. `patch` is merged into the "
+    + "document — Foundry's diff-update semantics apply (dotted paths like "
+    + "`elevation.bottom` accepted). Use this to flip visibility, locked, "
+    + "rename, swap behaviors, etc.",
+    {
+      sceneId:  z.string().describe("Target scene id."),
+      regionId: z.string().describe("Region document id."),
+      patch:    z.record(z.string(), z.any()).describe(
+        "Fields to merge into the region (e.g. {visibility: 0, locked: false})."
+      ),
+    });
+
+  registerRoutedTool(mcp, "delete_region",
+    "Delete a region by id. Permanent.",
+    {
+      sceneId:  z.string().describe("Target scene id."),
+      regionId: z.string().describe("Region document id to delete."),
+    });
+
   // --- Activate scene (v0.11.2) ---
   registerRoutedTool(mcp, "activate_scene",
     "Activate an existing scene by id or exact name — switches the canvas " +

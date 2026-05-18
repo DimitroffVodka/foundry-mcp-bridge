@@ -3491,6 +3491,169 @@ const handlers = {
   },
 
   /**
+   * Add a new level (floor) to a multi-level scene. v14 only — `scene.levels`
+   * is a v14-native EmbeddedCollection. Returns the created level.
+   */
+  add_scene_level: async (params = {}) => {
+    const { sceneId, name, bottom, top } = params;
+    if (!sceneId || !name) throw new Error("`sceneId` and `name` are required");
+    if (typeof bottom !== "number" || typeof top !== "number") {
+      throw new Error("`bottom` and `top` (numeric elevation in feet) are required");
+    }
+    const scene = game.scenes.get(sceneId);
+    if (!scene) throw new Error(`Scene "${sceneId}" not found`);
+
+    const [level] = await scene.createEmbeddedDocuments("Level", [{
+      name, elevation: { bottom, top }
+    }]);
+    if (!level) throw new Error("Level.create returned no document");
+    return { id: level.id, name: level.name, elevation: level.elevation };
+  },
+
+  /**
+   * Update an existing scene level's name and/or elevation range. Provide
+   * either `bottom` or `top` (or both); whatever's omitted is preserved.
+   */
+  update_scene_level: async (params = {}) => {
+    const { sceneId, levelId } = params;
+    if (!sceneId || !levelId) throw new Error("`sceneId` and `levelId` are required");
+    const scene = game.scenes.get(sceneId);
+    if (!scene) throw new Error(`Scene "${sceneId}" not found`);
+
+    const current = scene.levels?.get(levelId);
+    if (!current) throw new Error(`Level "${levelId}" not found on scene "${scene.name}"`);
+
+    const update = { _id: levelId };
+    const fieldsUpdated = [];
+    if (typeof params.name === "string") { update.name = params.name; fieldsUpdated.push("name"); }
+    if (typeof params.bottom === "number" || typeof params.top === "number") {
+      update.elevation = {
+        bottom: typeof params.bottom === "number" ? params.bottom : (current.elevation?.bottom ?? 0),
+        top:    typeof params.top    === "number" ? params.top    : (current.elevation?.top    ?? 20),
+      };
+      fieldsUpdated.push("elevation");
+    }
+    if (fieldsUpdated.length === 0) {
+      throw new Error("Provide at least one of `name`, `bottom`, `top`");
+    }
+
+    const [level] = await scene.updateEmbeddedDocuments("Level", [update]);
+    return { id: level.id, name: level.name, elevation: level.elevation, fieldsUpdated };
+  },
+
+  /**
+   * Remove a level from a multi-level scene. Refuses to delete the only
+   * remaining level — single-level scenes need at least one floor.
+   */
+  remove_scene_level: async (params = {}) => {
+    const { sceneId, levelId } = params;
+    if (!sceneId || !levelId) throw new Error("`sceneId` and `levelId` are required");
+    const scene = game.scenes.get(sceneId);
+    if (!scene) throw new Error(`Scene "${sceneId}" not found`);
+
+    if ((scene.levels?.size ?? 0) <= 1) {
+      throw new Error("Refusing to delete the only remaining level — a scene must have at least one.");
+    }
+    const level = scene.levels.get(levelId);
+    if (!level) throw new Error(`Level "${levelId}" not found on scene "${scene.name}"`);
+
+    const meta = { id: level.id, name: level.name, elevation: level.elevation };
+    await scene.deleteEmbeddedDocuments("Level", [levelId]);
+    return { ...meta, deleted: true };
+  },
+
+  /**
+   * Create a Region on a scene with shapes, optional behaviors, and level
+   * membership. Region shapes are objects per Foundry's RegionShape schema
+   * (e.g. {type: "rectangle", x, y, width, height}); behaviors follow the
+   * RegionBehavior schema (e.g. {type: "executeScript", system: {source}}).
+   */
+  create_region: async (params = {}) => {
+    const { sceneId, name, shapes, behaviors, levels, color, visibility, locked, elevation, ownership } = params;
+    if (!sceneId || !name) throw new Error("`sceneId` and `name` are required");
+    if (!Array.isArray(shapes) || shapes.length === 0) throw new Error("`shapes` must be a non-empty array");
+    const scene = game.scenes.get(sceneId);
+    if (!scene) throw new Error(`Scene "${sceneId}" not found`);
+
+    const data = { name, shapes };
+    if (Array.isArray(behaviors) && behaviors.length) data.behaviors = behaviors;
+    if (Array.isArray(levels) && levels.length)       data.levels = levels;
+    if (color)                                        data.color = color;
+    if (visibility !== undefined)                     data.visibility = visibility;
+    if (locked !== undefined)                         data.locked = locked;
+    if (elevation && typeof elevation === "object")   data.elevation = elevation;
+    if (ownership && typeof ownership === "object")   data.ownership = ownership;
+
+    const [region] = await scene.createEmbeddedDocuments("Region", [data]);
+    if (!region) throw new Error("Region.create returned no document");
+    return {
+      id: region.id,
+      name: region.name,
+      shapeCount: region.shapes?.length ?? 0,
+      behaviorCount: region.behaviors?.size ?? 0,
+      levels: Array.from(region.levels ?? [])
+    };
+  },
+
+  /**
+   * Patch any field on an existing region. The `patch` object is merged into
+   * the region document — use Foundry's diff-update semantics (dotted paths
+   * supported, e.g. `"elevation.bottom": 10`).
+   */
+  update_region: async (params = {}) => {
+    const { sceneId, regionId, patch } = params;
+    if (!sceneId || !regionId) throw new Error("`sceneId` and `regionId` are required");
+    if (!patch || typeof patch !== "object") throw new Error("`patch` is required and must be an object");
+    const scene = game.scenes.get(sceneId);
+    if (!scene) throw new Error(`Scene "${sceneId}" not found`);
+
+    const exists = scene.regions?.get(regionId);
+    if (!exists) throw new Error(`Region "${regionId}" not found on scene "${scene.name}"`);
+
+    const [region] = await scene.updateEmbeddedDocuments("Region", [{ _id: regionId, ...patch }]);
+    return {
+      id: region.id,
+      name: region.name,
+      fieldsUpdated: Object.keys(patch)
+    };
+  },
+
+  /** Delete a region by id. Permanent. */
+  delete_region: async (params = {}) => {
+    const { sceneId, regionId } = params;
+    if (!sceneId || !regionId) throw new Error("`sceneId` and `regionId` are required");
+    const scene = game.scenes.get(sceneId);
+    if (!scene) throw new Error(`Scene "${sceneId}" not found`);
+    const region = scene.regions?.get(regionId);
+    if (!region) throw new Error(`Region "${regionId}" not found on scene "${scene.name}"`);
+
+    const meta = { id: region.id, name: region.name };
+    await scene.deleteEmbeddedDocuments("Region", [regionId]);
+    return { ...meta, deleted: true };
+  },
+
+  /**
+   * Enumerate every registered RegionBehavior subtype and its schema fields.
+   * Lets the agent discover what `changeLevel`, `executeScript`,
+   * `damageToken`, etc. accept without reading Foundry/system source.
+   */
+  list_region_behavior_types: () => {
+    const dataModels = CONFIG.RegionBehavior?.dataModels ?? {};
+    const out = {};
+    for (const [type, model] of Object.entries(dataModels)) {
+      try {
+        const fields = model.schema?.fields ?? {};
+        out[type] = Object.fromEntries(
+          Object.entries(fields).map(([k, v]) => [k, v?.constructor?.name ?? typeof v])
+        );
+      } catch (err) {
+        out[type] = { _error: err.message };
+      }
+    }
+    return { types: out, count: Object.keys(out).length };
+  },
+
+  /**
    * Activate an existing scene by id or exact name. Used when you want to
    * switch to a different scene without recreating one. Returns the scene's
    * id, name, and active state.

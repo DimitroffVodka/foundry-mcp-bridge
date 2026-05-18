@@ -161,6 +161,14 @@ export function registerWorldTools(mcp) {
       type:    z.string().optional().describe("Filter by item type (e.g. 'weapon', 'spell', 'class')."),
     });
 
+  // --- Region behavior type discovery (v0.12.0) ---
+  registerRoutedTool(mcp, "list_region_behavior_types",
+    "Enumerate every registered RegionBehavior subtype and its schema "
+    + "fields. Lets the agent discover what `changeLevel`, `executeScript`, "
+    + "`damageToken`, `defineSurface`, etc. accept without reading the "
+    + "Foundry/system source. Returns `{ types: { <type>: { <field>: <DataField type>, ... } } }`.",
+    {});
+
   // --- Module API call (v0.11.1) ---
   registerRoutedTool(mcp, "call_module_api",
     "Call a function exposed on `game.modules.get(moduleId).api`. Allowlist-"
