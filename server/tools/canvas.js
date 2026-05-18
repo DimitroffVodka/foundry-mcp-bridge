@@ -87,6 +87,28 @@ export function registerCanvasTools(mcp) {
       tokens: z.array(z.string()).describe("Token names, actor names, or token document ids on the current scene. Empty array clears targets."),
     });
 
+  // --- Multi-level scene (v0.11.2) ---
+  registerRoutedTool(mcp, "get_scene_levels",
+    "Return the levels collection on a multi-level scene (Foundry v13+) as " +
+    "a flat array of `{id, name, elevation: {bottom, top}}`. Empty array " +
+    "for single-level scenes. Includes the currently-active `levelId` when " +
+    "the scene is the viewed one.",
+    {
+      sceneId: z.string().optional().describe("Target scene id. Default: active scene."),
+    });
+
+  registerRoutedTool(mcp, "set_canvas_level",
+    "Switch the canvas's active level — which floor of a multi-level scene " +
+    "is being viewed. Affects anything reading `canvas.level` (shadowdark-" +
+    "extras dungeon painter, level-aware visibility, wall-height, etc). " +
+    "Pass `levelId` OR an `elevation` (picks the level whose range contains " +
+    "it). Activates the target scene first if it isn't currently active.",
+    {
+      sceneId:   z.string().optional().describe("Target scene id. Default: active scene."),
+      levelId:   z.string().optional().describe("Level document id (preferred — unambiguous)."),
+      elevation: z.number().optional().describe("Elevation in Foundry units; picks the level whose [bottom, top] contains it."),
+    });
+
   // --- Image-returning tools (Type B: manual targetUser injection) ---
   registerRawTool(mcp, "screenshot",
     "Capture the live Foundry PIXI game canvas (map + tokens) as an image. " +

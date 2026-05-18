@@ -3399,6 +3399,187 @@ const handlers = {
   },
 
   /**
+   * Return the levels collection on a scene as a flat array. Multi-level
+   * scenes (Foundry v13+ native) expose `scene.levels` as a Map-like — each
+   * level has `{id, name, elevation: {bottom, top}}`. Single-level scenes
+   * return an empty levels array with a note.
+   */
+  get_scene_levels: (params = {}) => {
+    const scene = params.sceneId ? game.scenes.get(params.sceneId) : (canvas.scene ?? game.scenes.active);
+    if (!scene) throw new Error(params.sceneId ? `Scene "${params.sceneId}" not found` : "No active scene");
+
+    const collection = scene.levels;
+    const arr = collection?.contents
+            ?? (typeof collection?.values === "function" ? [...collection.values()] : (Array.isArray(collection) ? collection : []));
+
+    const activeLevelId = (canvas?.scene?.id === scene.id) ? (canvas.level?.id ?? null) : null;
+
+    return {
+      sceneId:       scene.id,
+      sceneName:     scene.name,
+      activeLevelId,
+      count:         arr.length,
+      levels:        arr.map(l => ({
+        id:        l.id,
+        name:      l.name,
+        elevation: l.elevation ? { bottom: l.elevation.bottom, top: l.elevation.top } : null
+      })),
+      ...(arr.length === 0 ? { note: "Scene has no levels collection — single-level scene." } : {})
+    };
+  },
+
+  /**
+   * Switch the canvas's active level (which floor of a multi-level scene is
+   * being viewed). Affects everything reading `canvas.level` — SDX dungeon
+   * painter, Levels-style visibility, wall-height. Pass either `levelId` or
+   * an `elevation` (picks the level whose elevation range contains it).
+   *
+   * If the target scene isn't currently active, activates it first.
+   * Tries multiple Foundry APIs in order — version-defensive.
+   */
+  set_canvas_level: async (params = {}) => {
+    const { sceneId, levelId, elevation } = params;
+    if (!levelId && typeof elevation !== "number") {
+      throw new Error("Provide either `levelId` or `elevation`");
+    }
+
+    const scene = sceneId ? game.scenes.get(sceneId) : (canvas.scene ?? game.scenes.active);
+    if (!scene) throw new Error(sceneId ? `Scene "${sceneId}" not found` : "No active scene");
+
+    // Resolve target level from the scene's level collection.
+    const levelsArr = scene.levels?.contents
+                  ?? (typeof scene.levels?.values === "function" ? [...scene.levels.values()] : []);
+    if (levelsArr.length === 0) {
+      throw new Error(`Scene "${scene.name}" has no levels (single-level scene — nothing to switch).`);
+    }
+
+    let level;
+    if (levelId) {
+      level = scene.levels?.get?.(levelId) ?? levelsArr.find(l => l.id === levelId);
+    } else {
+      level = levelsArr.find(l => {
+        const b = Number(l.elevation?.bottom ?? -Infinity);
+        const t = Number(l.elevation?.top ?? Infinity);
+        return elevation >= b && elevation <= t;
+      });
+    }
+    if (!level) {
+      throw new Error(
+        `No level matching ${levelId ? `id "${levelId}"` : `elevation ${elevation}`} on scene "${scene.name}". ` +
+        `Available: ${levelsArr.map(l => `${l.name} (${l.elevation?.bottom}..${l.elevation?.top})`).join(", ")}`
+      );
+    }
+
+    // Canonical v14 API: Scene.view({level: levelId}). Internally this sets
+    // canvas._viewOptions and calls canvas.draw(scene) which honors the
+    // level. canvas.level is a read-only getter — direct assignment throws.
+    const before = canvas.level?.id ?? null;
+    await scene.view({ level: level.id });
+    const after = canvas.level?.id ?? null;
+
+    return {
+      sceneId:   scene.id,
+      sceneName: scene.name,
+      levelId:   level.id,
+      levelName: level.name,
+      elevation: level.elevation,
+      before, after,
+      switched: before !== after
+    };
+  },
+
+  /**
+   * Activate an existing scene by id or exact name. Used when you want to
+   * switch to a different scene without recreating one. Returns the scene's
+   * id, name, and active state.
+   */
+  activate_scene: async (params = {}) => {
+    const { sceneId, sceneName } = params;
+    if (!sceneId && !sceneName) throw new Error("Either `sceneId` or `sceneName` is required");
+    const scene = sceneId
+      ? game.scenes.get(sceneId)
+      : game.scenes.getName(sceneName);
+    if (!scene) throw new Error(`Scene ${sceneId ? `id "${sceneId}"` : `name "${sceneName}"`} not found`);
+    await scene.activate();
+    return { id: scene.id, name: scene.name, active: scene.active };
+  },
+
+  /**
+   * List every scene in the world as a flat array of `{id, name, active, folder}`.
+   * Useful for finding an id to feed into activate_scene / delete_scene
+   * without resorting to evaluate.
+   */
+  list_scenes: () => {
+    return {
+      count: game.scenes.size,
+      scenes: game.scenes.contents.map(s => ({
+        id:     s.id,
+        name:   s.name,
+        active: s.active,
+        folder: s.folder?.id ?? null
+      }))
+    };
+  },
+
+  /**
+   * Create a new scene. `activate` defaults to true so the LLM doesn't need
+   * a second call for the common "make it and look at it" workflow.
+   */
+  create_scene: async (params = {}) => {
+    const data = {
+      name: params.name ?? "New Scene",
+      width:   params.width   ?? 4000,
+      height:  params.height  ?? 3000,
+      padding: params.padding ?? 0.25,
+      grid: {
+        type:  params.gridType  ?? CONST.GRID_TYPES.SQUARE,
+        size:  params.gridSize  ?? 100,
+        alpha: params.gridAlpha ?? 0.2,
+      },
+      backgroundColor: params.backgroundColor ?? "#1c1c1c",
+    };
+    if (params.background) data.background = { src: params.background };
+    if (params.folderId)   data.folder     = params.folderId;
+
+    const scene = await Scene.create(data);
+    if (!scene) throw new Error("Scene.create returned null");
+    if (params.activate !== false) await scene.activate();
+    return {
+      id: scene.id,
+      name: scene.name,
+      active: scene.active,
+      width: scene.width,
+      height: scene.height,
+      folder: scene.folder?.id ?? null
+    };
+  },
+
+  /**
+   * Delete a scene by id. Refuses to delete the currently active scene
+   * unless `force: true` — gives the LLM a chance to consider whether it
+   * really meant to wipe the open canvas.
+   */
+  delete_scene: async (params = {}) => {
+    const { sceneId, sceneName, force = false } = params;
+    if (!sceneId && !sceneName) throw new Error("Either `sceneId` or `sceneName` is required");
+    const scene = sceneId
+      ? game.scenes.get(sceneId)
+      : game.scenes.getName(sceneName);
+    if (!scene) throw new Error(`Scene ${sceneId ? `id "${sceneId}"` : `name "${sceneName}"`} not found`);
+
+    if (scene.active && !force) {
+      throw new Error(
+        `Scene "${scene.name}" (${scene.id}) is currently active. ` +
+        `Pass force: true to delete it anyway.`
+      );
+    }
+
+    const meta = { id: scene.id, name: scene.name, wasActive: scene.active };
+    await scene.delete();
+    return { ...meta, deleted: true };
+  },
+
+  /**
    * Call a function exposed on `game.modules.get(moduleId).api`. This is the
    * allowlist-style alternative to `evaluate` — only functions a module
    * deliberately puts on its `.api` surface are reachable, so the security

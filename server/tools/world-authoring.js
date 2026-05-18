@@ -412,6 +412,53 @@ export function registerWorldAuthoringTools(mcp) {
       })).describe("Per-target damage descriptors."),
     });
 
+  // --- Activate scene (v0.11.2) ---
+  registerRoutedTool(mcp, "activate_scene",
+    "Activate an existing scene by id or exact name — switches the canvas " +
+    "to view it. Use this to navigate between scenes without creating new "
+    + "ones. Pair with `list_scenes` to discover the id you need.",
+    {
+      sceneId:   z.string().optional().describe("Scene document id (preferred — unambiguous)."),
+      sceneName: z.string().optional().describe("Scene name (exact match). Used only if `sceneId` is omitted."),
+    });
+
+  // --- List scenes (v0.11.2) ---
+  registerRoutedTool(mcp, "list_scenes",
+    "List every scene in the world as `{id, name, active, folder}` per scene. "
+    + "Use to enumerate available scenes when you only know a name fragment "
+    + "or need to find which scene is currently active.",
+    {});
+
+  // --- Create scene (v0.11.2) ---
+  registerRoutedTool(mcp, "create_scene",
+    "Create a new scene with sensible defaults. Activates the new scene "
+    + "automatically unless `activate: false` is set — saves a second call "
+    + "for the common 'make it then look at it' workflow.",
+    {
+      name:            z.string().describe("Scene name (shown in the sidebar)."),
+      width:           z.number().int().optional().describe("Width in pixels. Default 4000."),
+      height:          z.number().int().optional().describe("Height in pixels. Default 3000."),
+      padding:         z.number().optional().describe("Outer padding (0.0–0.5). Default 0.25."),
+      gridType:        z.number().int().optional().describe("CONST.GRID_TYPES value (0=Gridless, 1=Square, 2-5=Hex variants). Default 1 (Square)."),
+      gridSize:        z.number().int().optional().describe("Grid cell size in pixels. Default 100."),
+      gridAlpha:       z.number().optional().describe("Grid line alpha (0.0–1.0). Default 0.2."),
+      backgroundColor: z.string().optional().describe("Hex background color. Default '#1c1c1c'."),
+      background:      z.string().optional().describe("Background image path/URL (sets scene.background.src)."),
+      folderId:        z.string().optional().describe("Parent folder id (Scene type)."),
+      activate:        z.boolean().optional().describe("Activate after creating. Default true."),
+    });
+
+  // --- Delete scene (v0.11.2) ---
+  registerRoutedTool(mcp, "delete_scene",
+    "Delete a scene by id or exact name. Refuses to delete the currently "
+    + "active scene unless `force: true` is passed — protects against "
+    + "accidentally wiping the open canvas. Permanent.",
+    {
+      sceneId:   z.string().optional().describe("Scene document id to delete (preferred — unambiguous)."),
+      sceneName: z.string().optional().describe("Scene name (exact match). Used only if `sceneId` is omitted."),
+      force:     z.boolean().optional().describe("Set true to delete even if the scene is currently active. Default false."),
+    });
+
   // --- Place measured template (v0.11) ---
   registerRoutedTool(mcp, "place_measured_template",
     "Drop a MeasuredTemplate onto a scene (fireball circle, cone, wall ray, "
