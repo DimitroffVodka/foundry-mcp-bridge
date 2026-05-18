@@ -1,6 +1,7 @@
 node_modules/
 .claude/
 .gemini/
+.planning/
 .DS_Store
 *.log
 dist/
