@@ -2074,6 +2074,156 @@ const handlers = {
 
     await page.update(updateData);
     return { journalId, pageId, fieldsUpdated };
+  },
+
+  // -------------------------------------------------------------------------
+  // World authoring — delete/update counterparts (also gated server-side
+  // behind FOUNDRY_MCP_ALLOW_WRITE=1). These are the symmetric undo/edit
+  // tools so an LLM can correct its own mistakes without escalating to
+  // `evaluate`.
+  // -------------------------------------------------------------------------
+
+  /** Delete a folder by id. Foundry orphans contained documents (sets their
+   *  folder to null) rather than cascading by default — use `deleteContents`
+   *  to wipe the contents along with the folder. */
+  delete_folder: async (params = {}) => {
+    const { folderId, deleteContents } = params;
+    if (!folderId) throw new Error("`folderId` is required");
+    const folder = game.folders.get(folderId);
+    if (!folder) throw new Error(`Folder "${folderId}" not found`);
+    const meta = { id: folder.id, name: folder.name, type: folder.type };
+    await folder.delete({ deleteSubfolders: !!deleteContents, deleteContents: !!deleteContents });
+    return { ...meta, deleted: true, deleteContents: !!deleteContents };
+  },
+
+  /** Delete an actor by id. Permanent — Foundry's undo doesn't cover document
+   *  deletion. The LLM should `get_actor` first if any data needs to be
+   *  preserved. */
+  delete_actor: async (params = {}) => {
+    const { actorId } = params;
+    if (!actorId) throw new Error("`actorId` is required");
+    const actor = game.actors.get(actorId);
+    if (!actor) throw new Error(`Actor "${actorId}" not found`);
+    const meta = { id: actor.id, name: actor.name, type: actor.type };
+    await actor.delete();
+    return { ...meta, deleted: true };
+  },
+
+  /** Patch an existing actor's top-level fields and/or system data. Use this
+   *  to tweak HP/stats/name/img after `create_actor_from_compendium` instead
+   *  of recreating the actor from scratch. */
+  update_actor: async (params = {}) => {
+    const { actorId, name, img, system, prototypeToken } = params;
+    if (!actorId) throw new Error("`actorId` is required");
+    const actor = game.actors.get(actorId);
+    if (!actor) throw new Error(`Actor "${actorId}" not found`);
+
+    const updateData = {};
+    const fieldsUpdated = [];
+    if (typeof name === "string")        { updateData.name = name;                       fieldsUpdated.push("name"); }
+    if (typeof img === "string")         { updateData.img = img;                         fieldsUpdated.push("img"); }
+    if (system && typeof system === "object")
+                                         { updateData.system = system;                   fieldsUpdated.push("system"); }
+    if (prototypeToken && typeof prototypeToken === "object")
+                                         { updateData.prototypeToken = prototypeToken;   fieldsUpdated.push("prototypeToken"); }
+
+    if (fieldsUpdated.length === 0) {
+      throw new Error("Provide at least one of: `name`, `img`, `system`, `prototypeToken`");
+    }
+
+    await actor.update(updateData);
+    return { actorId, fieldsUpdated };
+  },
+
+  /** Remove embedded items from an actor by id. Items not found on the actor
+   *  are reported in `missing`; the rest are deleted. */
+  delete_items_from_actor: async (params = {}) => {
+    const { actorId, itemIds } = params;
+    if (!actorId) throw new Error("`actorId` is required");
+    if (!Array.isArray(itemIds) || itemIds.length === 0) {
+      throw new Error("`itemIds` must be a non-empty array");
+    }
+    const actor = game.actors.get(actorId);
+    if (!actor) throw new Error(`Actor "${actorId}" not found`);
+
+    const present = itemIds.filter(id => actor.items.get(id));
+    const missing = itemIds.filter(id => !actor.items.get(id));
+
+    if (present.length === 0) {
+      return { actorId, deleted: [], missing };
+    }
+
+    const deletedSnapshot = present.map(id => {
+      const it = actor.items.get(id);
+      return { id, name: it.name, type: it.type };
+    });
+    await actor.deleteEmbeddedDocuments("Item", present);
+    return { actorId, deleted: deletedSnapshot, missing };
+  },
+
+  /** Patch a single embedded item on an actor. `data` is merged into the
+   *  item's document (top-level fields like `name`/`img`/`system.*`). */
+  update_item_on_actor: async (params = {}) => {
+    const { actorId, itemId, data } = params;
+    if (!actorId || !itemId) throw new Error("`actorId` and `itemId` are required");
+    if (!data || typeof data !== "object") {
+      throw new Error("`data` must be an object with fields to update");
+    }
+    const actor = game.actors.get(actorId);
+    if (!actor) throw new Error(`Actor "${actorId}" not found`);
+    const item = actor.items.get(itemId);
+    if (!item) throw new Error(`Item "${itemId}" not found on actor "${actorId}"`);
+
+    await actor.updateEmbeddedDocuments("Item", [{ _id: itemId, ...data }]);
+    return { actorId, itemId, fieldsUpdated: Object.keys(data) };
+  },
+
+  /** Delete a journal entry by id. Removes all pages with it. */
+  delete_journal_entry: async (params = {}) => {
+    const { journalId } = params;
+    if (!journalId) throw new Error("`journalId` is required");
+    const journal = game.journal.get(journalId);
+    if (!journal) throw new Error(`Journal "${journalId}" not found`);
+    const meta = { id: journal.id, name: journal.name, pageCount: journal.pages.size };
+    await journal.delete();
+    return { ...meta, deleted: true };
+  },
+
+  /** Delete a single page from a journal entry, leaving the entry itself. */
+  delete_journal_page: async (params = {}) => {
+    const { journalId, pageId } = params;
+    if (!journalId || !pageId) throw new Error("`journalId` and `pageId` are required");
+    const journal = game.journal.get(journalId);
+    if (!journal) throw new Error(`Journal "${journalId}" not found`);
+    const page = journal.pages.get(pageId);
+    if (!page) throw new Error(`Page "${pageId}" not found in journal "${journalId}"`);
+    const meta = { journalId, pageId, name: page.name };
+    await journal.deleteEmbeddedDocuments("JournalEntryPage", [pageId]);
+    return { ...meta, deleted: true };
+  },
+
+  /** Add a new page to an existing journal entry. Page shape matches
+   *  `create_journal_entry`'s pages[] entries. Returns the new page id. */
+  add_page_to_journal_entry: async (params = {}) => {
+    const { journalId, page } = params;
+    if (!journalId) throw new Error("`journalId` is required");
+    if (!page?.name) throw new Error("`page.name` is required");
+    const journal = game.journal.get(journalId);
+    if (!journal) throw new Error(`Journal "${journalId}" not found`);
+
+    const pageData = { name: page.name, type: page.type ?? "text" };
+    if (pageData.type === "text") {
+      pageData.text = {
+        content: page.text?.content ?? "",
+        format:  page.text?.format  ?? 1
+      };
+    } else if (page.src) {
+      pageData.src = page.src;
+    }
+
+    const [created] = await journal.createEmbeddedDocuments("JournalEntryPage", [pageData]);
+    if (!created) throw new Error("Journal page create returned no document");
+    return { journalId, pageId: created.id, name: created.name };
   }
 };
 

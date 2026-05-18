@@ -504,6 +504,68 @@ Update a journal page's name and/or text content. Designed for **iterative writi
   - `appendContent` (optional) — append to existing body. Ignored if `content` is also given.
 - **Returns**: `{ journalId, pageId, fieldsUpdated }` — `fieldsUpdated` lists which fields actually changed (`"name"`, `"text.content (replaced)"`, `"text.content (appended)"`).
 
+### `delete_folder`
+Delete a folder by id. By default Foundry **orphans** the contained documents (sets their `folder` to null). Pass `deleteContents: true` to wipe contents and subfolders too. Permanent.
+
+- **Params**:
+  - `folderId` — folder document id.
+  - `deleteContents` (optional, default `false`) — if `true`, delete every document and subfolder inside the folder too.
+- **Returns**: `{ id, name, type, deleted: true, deleteContents }`.
+
+### `delete_actor`
+Delete an actor by id. Permanent. Call `get_actor` or `snapshot_actor` first if any data needs to be preserved.
+
+- **Params**: `actorId`.
+- **Returns**: `{ id, name, type, deleted: true }`.
+
+### `update_actor`
+Patch an existing actor's top-level fields and/or system data. Use this to tweak HP/stats/name/portrait after `create_actor_from_compendium` instead of recreating the actor from scratch. At least one update field is required.
+
+- **Params**:
+  - `actorId` — actor document id.
+  - `name` (optional) — replace the actor's name.
+  - `img` (optional) — replace the portrait image path/URL.
+  - `system` (optional) — object merged into the actor's `system` data. Use `get_data_model` to learn the active system's shape.
+  - `prototypeToken` (optional) — object merged into the prototype token (affects future tokens placed from this actor).
+- **Returns**: `{ actorId, fieldsUpdated }`.
+
+### `delete_items_from_actor`
+Remove embedded items from an actor by id.
+
+- **Params**:
+  - `actorId` — actor document id.
+  - `itemIds` — array of embedded item ids.
+- **Returns**: `{ actorId, deleted: [{ id, name, type }], missing: [ids] }` — `missing` lists ids that weren't on the actor (the rest are deleted).
+
+### `update_item_on_actor`
+Patch a single embedded item on an actor. `data` is merged into the item document — top-level fields (`name`, `img`) and `system.*` sub-paths are all accepted.
+
+- **Params**:
+  - `actorId` — actor document id.
+  - `itemId` — embedded item id.
+  - `data` — object of fields to merge.
+- **Returns**: `{ actorId, itemId, fieldsUpdated: [...] }`.
+
+### `delete_journal_entry`
+Delete a journal entry and all of its pages. Permanent.
+
+- **Params**: `journalId`.
+- **Returns**: `{ id, name, pageCount, deleted: true }`.
+
+### `delete_journal_page`
+Delete a single page from a journal entry. The entry itself remains.
+
+- **Params**: `journalId`, `pageId`.
+- **Returns**: `{ journalId, pageId, name, deleted: true }`.
+
+### `add_page_to_journal_entry`
+Add a new page to an existing journal entry. Page shape matches `create_journal_entry`'s `pages[]` entries.
+
+- **Params**:
+  - `journalId` — parent journal entry id.
+  - `page` — `{ name, type?, text?: { content, format? }, src? }`. Same fields as `create_journal_entry` pages.
+- **Returns**: `{ journalId, pageId, name }`.
+
 ---
 
 ## Patterns & workflows

@@ -86,7 +86,13 @@ Some tools mutate live Foundry state — they will change what GMs and players s
 
 **Mutating tools include** (not exhaustive — check the tool description): `move_token`, `move_token_pathed`, `update_token`, `delete_tokens`, `toggle_token_condition`, `use_item`, `roll`, `reload_foundry`, `target`, `click`, `simulate_dialog_response`, and `evaluate` if enabled.
 
-**World-authoring tools** (only present when `FOUNDRY_MCP_ALLOW_WRITE=1` on the server): `create_folder`, `create_actor`, `create_actor_from_compendium`, `add_items_to_actor`, `create_journal_entry`, `update_journal_page`. These create persistent world data — actors, journals, folders. If they're not in your tool list, the server's write gate is off and that's intentional; tell the user to set the env var rather than retrying.
+**World-authoring tools** (only present when `FOUNDRY_MCP_ALLOW_WRITE=1` on the server):
+
+- Creates: `create_folder`, `create_actor`, `create_actor_from_compendium`, `add_items_to_actor`, `create_journal_entry`, `add_page_to_journal_entry`
+- Updates: `update_actor`, `update_item_on_actor`, `update_journal_page`
+- Deletes (permanent — Foundry has no undo for these): `delete_folder`, `delete_actor`, `delete_items_from_actor`, `delete_journal_entry`, `delete_journal_page`
+
+If they're not in your tool list, the server's write gate is off and that's intentional; tell the user to set the env var rather than retrying. Before any delete, prefer reading the document with `get_actor` / `list_journals` / etc. first so you can confirm you're nuking the right thing — there is no recovery.
 
 **Read-only safe to explore with:** `list_*`, `get_*`, `snapshot_*`, `diff_*`, `search_compendium`, `screenshot`, `capture_scene`, `get_console_errors`, `trace_*`.
 

@@ -137,4 +137,99 @@ export function registerWorldAuthoringTools(mcp) {
       content:       z.string().optional().describe("Replace the page body (HTML or Markdown per the page's format)."),
       appendContent: z.string().optional().describe("Append to the existing page body. Ignored if `content` is also provided."),
     });
+
+  // --- Delete: folder ---
+  registerRoutedTool(mcp, "delete_folder",
+    "Delete a folder by id. Foundry orphans contained documents by default "
+    + "(sets their folder to null). Pass `deleteContents: true` to also "
+    + "delete every document and subfolder inside. Permanent — Foundry's "
+    + "undo doesn't cover deletes.",
+    {
+      folderId:       z.string().describe("Folder document id."),
+      deleteContents: z.boolean().optional().describe(
+        "If true, delete all contained documents and subfolders too. Default false (orphan)."
+      ),
+    });
+
+  // --- Delete: actor ---
+  registerRoutedTool(mcp, "delete_actor",
+    "Delete an actor by id. Permanent — Foundry's undo doesn't cover document "
+    + "deletion. If any data on the actor needs to survive, call `get_actor` "
+    + "or `snapshot_actor` first.",
+    {
+      actorId: z.string().describe("Actor document id."),
+    });
+
+  // --- Update: actor ---
+  registerRoutedTool(mcp, "update_actor",
+    "Patch an existing actor's top-level fields and/or system data. Use this "
+    + "to tweak HP/stats/name/img/portrait after `create_actor_from_compendium` "
+    + "instead of recreating the actor from scratch. At least one of `name`, "
+    + "`img`, `system`, or `prototypeToken` is required.",
+    {
+      actorId:        z.string().describe("Actor document id."),
+      name:           z.string().optional().describe("Replace the actor's name."),
+      img:            z.string().optional().describe("Replace the portrait image path/URL."),
+      system:         z.record(z.string(), z.any()).optional().describe(
+        "Merge into the actor's `system` data. Use `get_data_model` for the active system's shape."
+      ),
+      prototypeToken: z.record(z.string(), z.any()).optional().describe(
+        "Merge into the prototype token (affects future tokens placed from this actor)."
+      ),
+    });
+
+  // --- Items on actor: delete ---
+  registerRoutedTool(mcp, "delete_items_from_actor",
+    "Remove embedded items from an actor by id. Items not on the actor are "
+    + "returned in `missing`; the rest are deleted.",
+    {
+      actorId: z.string().describe("Actor document id."),
+      itemIds: z.array(z.string()).describe("Embedded item ids to remove."),
+    });
+
+  // --- Items on actor: update ---
+  registerRoutedTool(mcp, "update_item_on_actor",
+    "Patch a single embedded item on an actor. `data` is merged into the "
+    + "item document — top-level fields like `name`, `img`, and "
+    + "`system.*` sub-paths are all accepted.",
+    {
+      actorId: z.string().describe("Actor document id."),
+      itemId:  z.string().describe("Embedded item id."),
+      data:    z.record(z.string(), z.any()).describe(
+        "Fields to merge into the item. Foundry's diff-update semantics apply."
+      ),
+    });
+
+  // --- Delete: journal entry ---
+  registerRoutedTool(mcp, "delete_journal_entry",
+    "Delete a journal entry and all of its pages. Permanent — Foundry's "
+    + "undo doesn't cover document deletion.",
+    {
+      journalId: z.string().describe("Journal entry document id."),
+    });
+
+  // --- Delete: journal page ---
+  registerRoutedTool(mcp, "delete_journal_page",
+    "Delete a single page from a journal entry. The entry itself remains.",
+    {
+      journalId: z.string().describe("Parent journal entry id."),
+      pageId:    z.string().describe("Page id to delete."),
+    });
+
+  // --- Add page to journal entry ---
+  registerRoutedTool(mcp, "add_page_to_journal_entry",
+    "Add a new page to an existing journal entry. Page shape matches the "
+    + "entries in `create_journal_entry`'s `pages[]`.",
+    {
+      journalId: z.string().describe("Parent journal entry id."),
+      page:      z.object({
+        name:    z.string().describe("Page name."),
+        type:    z.enum(["text", "image", "pdf", "video"]).optional().describe("Default 'text'."),
+        text:    z.object({
+          content: z.string(),
+          format:  z.union([z.literal(1), z.literal(2)]).optional(),
+        }).optional(),
+        src:     z.string().optional().describe("URL/path for image/pdf/video pages."),
+      }).describe("Page to add."),
+    });
 }
