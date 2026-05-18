@@ -2533,11 +2533,16 @@ const handlers = {
 
     const data = { content };
 
+    // ChatMessage style field renamed from `type` → `style` in Foundry v12+.
+    // We're compat v12 minimum, so use `style` exclusively. CONST has both
+    // CHAT_MESSAGE_STYLES (new, preferred) and CHAT_MESSAGE_TYPES (legacy alias)
+    // — read either, write to data.style.
+    const styleConsts = CONST.CHAT_MESSAGE_STYLES ?? CONST.CHAT_MESSAGE_TYPES;
     if (typeof type === "string") {
-      const t = CONST.CHAT_MESSAGE_STYLES?.[type.toUpperCase()] ?? CONST.CHAT_MESSAGE_TYPES?.[type.toUpperCase()];
-      if (t !== undefined) data.type = t;
+      const v = styleConsts?.[type.toUpperCase()];
+      if (v !== undefined) data.style = v;
     } else if (typeof type === "number") {
-      data.type = type;
+      data.style = type;
     }
 
     // Speaker
@@ -2574,6 +2579,9 @@ const handlers = {
     }
 
     const msg = await ChatMessage.create(data);
+    if (!msg) {
+      throw new Error("ChatMessage.create returned no document — possible cause: invalid speaker/whisper/style field for this Foundry version");
+    }
     return {
       id: msg.id,
       timestamp: msg.timestamp,
