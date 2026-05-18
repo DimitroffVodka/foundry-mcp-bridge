@@ -350,48 +350,48 @@ export function registerWorldAuthoringTools(mcp) {
   // --- Typed roll (v0.10.0) ---
   registerRoutedTool(mcp, "request_roll_typed",
     "Triggers a system-native roll (Skill, Ability, or Save) on an actor. "
-    + "This handles system-specific modifiers and formatting.",
+    + "This handles system-specific modifiers and formatting. Dialogs are "
+    + "always suppressed — no fastForward knob is needed.",
     {
-      actorId:     z.string().describe("Actor ID or name."),
-      type:        z.enum(["skill", "ability", "save"]).describe("Category of the roll."),
-      identifier:  z.string().describe("System-specific ID for the roll (e.g. 'ath' for 5e Athletics)."),
-      dc:          z.number().optional().describe("Target DC for success evaluation."),
-      adv:         z.enum(["normal", "advantage", "disadvantage"]).optional().describe("Force advantage state."),
-      fastForward: z.boolean().optional().describe("Bypass dialogs (default true)."),
+      actorId:    z.string().describe("Actor ID or name."),
+      type:       z.enum(["skill", "ability", "save"]).describe("Category of the roll."),
+      identifier: z.string().describe("System-specific ID for the roll (e.g. 'ath' for 5e Athletics, 'athletics' for PF2e, 'str' for Shadowdark stat)."),
+      dc:         z.number().optional().describe("Target DC for success evaluation."),
+      adv:        z.enum(["normal", "advantage", "disadvantage"]).optional().describe("Force advantage state (dnd5e + shadowdark only; ignored elsewhere)."),
     });
 
   // --- Attack roll (v0.10.0) ---
   registerRoutedTool(mcp, "request_attack_roll",
-    "Triggers only the attack roll part of an item's workflow.",
+    "Triggers only the attack roll part of an item's workflow. Dialogs always suppressed.",
     {
-      actorId:     z.string().describe("Actor ID or name."),
-      itemId:      z.string().describe("Item/weapon ID or name."),
-      adv:         z.enum(["normal", "advantage", "disadvantage"]).optional().describe("Force advantage state."),
-      fastForward: z.boolean().optional().describe("Bypass dialogs (default true)."),
+      actorId:    z.string().describe("Actor ID or name."),
+      itemId:     z.string().describe("Item/weapon ID or name."),
+      activityId: z.string().optional().describe("D&D 5e specific activity ID (when an item has multiple attack activities)."),
+      adv:        z.enum(["normal", "advantage", "disadvantage"]).optional().describe("Force advantage state (system-dependent)."),
     });
 
   // --- Damage roll (v0.10.0) ---
   registerRoutedTool(mcp, "request_damage_roll",
-    "Triggers the damage roll for an item. The caller must provide critical state.",
+    "Triggers the damage roll for an item. The caller must provide critical state. "
+    + "Does NOT re-roll the attack — fetches the activity/strike directly from the item.",
     {
-      actorId:     z.string().describe("Actor ID or name."),
-      itemId:      z.string().describe("Item/weapon ID or name."),
-      isCritical:  z.boolean().optional().describe("Force critical damage."),
-      fastForward: z.boolean().optional().describe("Bypass dialogs (default true)."),
+      actorId:    z.string().describe("Actor ID or name."),
+      itemId:     z.string().describe("Item/weapon ID or name."),
+      isCritical: z.boolean().optional().describe("Force critical damage (doubles dice on d20 systems)."),
     });
 
   // --- Item use: Full Flow (v0.10.0) ---
   registerRawTool(mcp, "request_item_use",
-    "Executes a full attack-and-damage workflow. Attack -> Hit? -> Damage -> Apply. "
-    + "This is the recommended tool for combat actions.",
+    "Executes a full attack-and-damage workflow. Attack -> Hit? -> Damage -> (optional) Apply. "
+    + "Recommended tool for combat actions — threads crit state from the attack into damage "
+    + "automatically. Dialogs always suppressed.",
     {
-      actorId:     z.string().describe("Actor ID or name."),
-      itemId:      z.string().describe("Item/weapon ID or name."),
-      targetIds:   z.array(z.string()).optional().describe("Apply damage to these target IDs on hit."),
-      activityId:  z.string().optional().describe("D&D 5e specific activity ID."),
-      adv:         z.enum(["normal", "advantage", "disadvantage"]).optional().describe("Force advantage state."),
-      fastForward: z.boolean().optional().describe("Bypass dialogs (default true)."),
-      targetUser:  z.string().optional().describe(TARGET_USER_DESC),
+      actorId:    z.string().describe("Actor ID or name."),
+      itemId:     z.string().describe("Item/weapon ID or name."),
+      targetIds:  z.array(z.string()).optional().describe("If provided, damage is applied to these targets on hit."),
+      activityId: z.string().optional().describe("D&D 5e specific activity ID."),
+      adv:        z.enum(["normal", "advantage", "disadvantage"]).optional().describe("Force advantage state."),
+      targetUser: z.string().optional().describe(TARGET_USER_DESC),
     },
     async (params) => {
       const { targetUser, targetIds = [], ...rest } = params;

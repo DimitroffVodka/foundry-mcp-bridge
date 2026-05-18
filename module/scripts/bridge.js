@@ -664,23 +664,25 @@ async function _resolveFolder(type, folderId, folderName, autoCreate = true) {
  */
 const DISPATCHERS = {
   dnd5e: {
+    // dnd5e v3+ signature: rollSkill(config, dialog, message)
+    // Identifier goes INSIDE the config object, not as the first positional arg.
     rollSkill: (actor, { identifier, target, adv }) => {
-      const config = { target };
+      const config = { skill: identifier, target };
       if (adv === "advantage") config.advantage = true;
       if (adv === "disadvantage") config.disadvantage = true;
-      return actor.rollSkill(identifier, config, { configure: false });
+      return actor.rollSkill(config, { configure: false });
     },
     rollAbility: (actor, { identifier, target, adv }) => {
-      const config = { target };
+      const config = { ability: identifier, target };
       if (adv === "advantage") config.advantage = true;
       if (adv === "disadvantage") config.disadvantage = true;
-      return actor.rollAbilityCheck(identifier, config, { configure: false });
+      return actor.rollAbilityCheck(config, { configure: false });
     },
     rollSave: (actor, { identifier, target, adv }) => {
-      const config = { target };
+      const config = { ability: identifier, target };
       if (adv === "advantage") config.advantage = true;
       if (adv === "disadvantage") config.disadvantage = true;
-      return actor.rollSavingThrow(identifier, config, { configure: false });
+      return actor.rollSavingThrow(config, { configure: false });
     },
     rollAttack: async (actor, item, { activityId, adv }) => {
       const activity = activityId ? item.system.activities.get(activityId) : item.system.activities.find(a => a.type === "attack");
@@ -690,8 +692,14 @@ const DISPATCHERS = {
       if (adv === "disadvantage") config.disadvantage = true;
       return { roll: await activity.rollAttack(config, { configure: false }), activity };
     },
-    rollDamage: (activity, { isCritical }) => {
-      const config = isCritical ? { rollMode: "critical" } : {};
+    // dnd5e v3+: damage activity inherits crit from `config.attack` (the prior
+    // attack roll). When no attack roll is available (caller used
+    // request_damage_roll standalone), pass `critical: true` as a force-flag.
+    // `rollMode` was incorrect here — it controls visibility, not crit state.
+    rollDamage: (activity, { isCritical, attackRoll }) => {
+      const config = {};
+      if (attackRoll) config.attack = attackRoll;
+      if (isCritical && !attackRoll) config.critical = true;
       return activity.rollDamage(config, { configure: false });
     },
     applyDamage: (actor, { amount, type, multiplier = 1 }) => {
@@ -714,6 +722,13 @@ const DISPATCHERS = {
       const stat = actor.saves[identifier];
       if (!stat?.roll) throw new Error(`Save "${identifier}" not found on actor`);
       return stat.roll({ dc: target ? { value: target } : undefined, skipDialog: true });
+    },
+    // Helper used by request_damage_roll to fetch a Strike without re-rolling
+    // the attack (which would post a duplicate chat card).
+    getStrike: (actor, itemId) => {
+      const strike = actor.system.actions.find(a => a.item.id === itemId);
+      if (!strike) throw new Error(`No Strike found for item "${itemId}"`);
+      return strike;
     },
     rollAttack: async (actor, item) => {
       const strike = actor.system.actions.find(a => a.item.id === item.id);
@@ -763,6 +778,11 @@ const DISPATCHERS = {
   },
 
   vagabond: {
+    // NOTE: Vagabond's VagabondRollBuilder.buildAndEvaluateD20 signature does
+    // not currently accept a stat/skill identifier through this entry point
+    // (per research). The `identifier` param is captured for API symmetry but
+    // ignored here — the underlying roll uses the actor's default stat
+    // resolution. Extend this when a richer Vagabond entry point exists.
     rollSkill: (actor, { identifier }) => {
       return game.vagabond.api.VagabondRollBuilder.buildAndEvaluateD20(actor, 'none');
     },
@@ -2973,10 +2993,13 @@ const handlers = {
   },
 
   /**
-   * Triggers the damage roll for an item.
+   * Triggers the damage roll for an item without rolling an attack first.
+   * Per-system damage context is resolved directly from the item — earlier
+   * versions of this handler re-rolled the attack to fetch the dnd5e activity
+   * which posted a duplicate chat card.
    */
   request_damage_roll: async (params = {}) => {
-    const { actorId, itemId, isCritical, fastForward = true } = params;
+    const { actorId, itemId, isCritical } = params;
     if (!actorId || !itemId) throw new Error("`actorId` and `itemId` are required");
 
     const actor = game.actors.get(actorId) || game.actors.getName(actorId);
@@ -2989,29 +3012,35 @@ const handlers = {
     const dispatcher = DISPATCHERS[systemId];
     if (!dispatcher || !dispatcher.rollDamage) throw new Error(`System "${systemId}" not supported for damage rolls.`);
 
-    // Resolve context needed for damage (differs by system)
-    let context;
+    let roll;
     if (systemId === "dnd5e") {
-      const attackRes = await dispatcher.rollAttack(actor, item, {});
-      context = attackRes.activity;
+      const activity = item.system.activities?.find?.(a => a.type === "attack")
+        ?? item.system.activities?.contents?.find(a => a.type === "attack");
+      if (!activity) throw new Error(`No attack activity found on item "${item.name}"`);
+      roll = await dispatcher.rollDamage(activity, { isCritical });
     } else if (systemId === "pf2e") {
-      context = dispatcher.getStrike(actor, itemId);
+      const strike = dispatcher.getStrike(actor, item.id);
+      roll = await dispatcher.rollDamage(strike, { isCritical });
     } else if (systemId === "shadowdark") {
-      context = { itemUuid: actor.type === "npc" ? item.id : item.uuid };
+      const itemUuid = actor.type === "npc" ? item.id : item.uuid;
+      roll = await dispatcher.rollDamage(actor, { itemUuid });
     } else if (systemId === "vagabond") {
-      context = { isCritical, actor, item };
+      roll = await dispatcher.rollDamage(item, { isCritical, actor });
+    } else {
+      throw new Error(`System "${systemId}" not supported for damage rolls.`);
     }
 
-    const roll = await (systemId === "vagabond" ? dispatcher.rollDamage(context.item, context) : dispatcher.rollDamage(context, { isCritical }));
-    
     return _normalizeDamageResult(systemId, roll, isCritical);
   },
 
   /**
    * Executes a full attack-and-damage workflow (v0.10.0 Full Flow).
+   * Resolves a `targetAC` for the hit check from either `targetIds[0]` or the
+   * current Foundry target, and threads the attack roll into the damage call
+   * so per-system crit inheritance works.
    */
   request_item_use: async (params = {}) => {
-    const { actorId, itemId, targetIds, activityId, fastForward = true, adv } = params;
+    const { actorId, itemId, targetIds, activityId, adv } = params;
     if (!actorId || !itemId) throw new Error("`actorId` and `itemId` are required");
 
     const actor = game.actors.get(actorId) || game.actors.getName(actorId);
@@ -3024,27 +3053,40 @@ const handlers = {
     const dispatcher = DISPATCHERS[systemId];
     if (!dispatcher) throw new Error(`System "${systemId}" not supported for item use.`);
 
+    // Resolve a target AC for hit-check (prefer first explicit targetId, else
+    // current Foundry target). Non-d20 systems may not have AC at all.
+    let targetAC = null;
+    const firstTargetRef = Array.isArray(targetIds) && targetIds.length > 0 ? targetIds[0] : null;
+    let primaryTarget = firstTargetRef
+      ? (game.actors.get(firstTargetRef) || game.actors.getName(firstTargetRef) || canvas.tokens.get(firstTargetRef)?.actor)
+      : game.user.targets.first()?.actor;
+    if (primaryTarget) {
+      targetAC = primaryTarget.system.attributes?.ac?.value ?? primaryTarget.system.ac?.value ?? null;
+    }
+
     const results = { itemId: item.id };
 
     // 1. Attack
     const attackData = await dispatcher.rollAttack(actor, item, { activityId, adv });
-    results.attack = _normalizeAttackResult(systemId, attackData.roll);
+    const rawAttackRoll = Array.isArray(attackData.roll) ? attackData.roll[0] : attackData.roll;
+    results.attack = _normalizeAttackResult(systemId, attackData.roll, targetAC);
 
     // 2. Damage (if hit)
     if (results.attack.hit) {
       let damageRoll;
       const isCrit = results.attack.isCritical || results.attack.degreeOfSuccess === 3;
-      
+
       if (systemId === "dnd5e") {
-        damageRoll = await dispatcher.rollDamage(attackData.activity, { isCritical: isCrit });
+        // Thread the attack roll into damage so the activity inherits crit.
+        damageRoll = await dispatcher.rollDamage(attackData.activity, { isCritical: isCrit, attackRoll: rawAttackRoll });
       } else if (systemId === "pf2e") {
         damageRoll = await dispatcher.rollDamage(attackData.strike, { isCritical: isCrit });
       } else if (systemId === "shadowdark") {
-        damageRoll = await dispatcher.rollDamage(actor, attackData);
+        damageRoll = await dispatcher.rollDamage(actor, { itemUuid: attackData.itemUuid });
       } else if (systemId === "vagabond") {
         damageRoll = await dispatcher.rollDamage(item, { isCritical: isCrit, actor });
       }
-      
+
       results.damage = _normalizeDamageResult(systemId, damageRoll, isCrit);
 
       // 3. Apply (if targetIds provided)
@@ -3052,14 +3094,16 @@ const handlers = {
         results.applied = [];
         for (const tid of targetIds) {
           const tactor = game.actors.get(tid) || game.actors.getName(tid) || canvas.tokens.get(tid)?.actor;
-          if (tactor) {
-            const applyRes = await dispatcher.applyDamage(tactor, { amount: results.damage.total });
-            results.applied.push({ 
-              targetId: tid, 
-              delta: applyRes.delta ?? results.damage.total, 
-              newHP: applyRes.newHP ?? (tactor.system.attributes?.hp?.value || tactor.system.hp?.value) 
-            });
-          }
+          if (!tactor) continue;
+          const hpBefore = tactor.system.attributes?.hp?.value ?? tactor.system.hp?.value ?? null;
+          const applyRes = await dispatcher.applyDamage(tactor, { amount: results.damage.total });
+          const hpAfter  = tactor.system.attributes?.hp?.value ?? tactor.system.hp?.value ?? null;
+          const computedDelta = (hpBefore != null && hpAfter != null) ? (hpBefore - hpAfter) : null;
+          results.applied.push({
+            targetId: tid,
+            delta: applyRes?.delta ?? computedDelta ?? results.damage.total,
+            newHP: applyRes?.newHP ?? hpAfter
+          });
         }
       }
     }
@@ -3069,6 +3113,8 @@ const handlers = {
 
   /**
    * Applies damage to one or more targets with mixed outcomes (AoE support).
+   * Captures actor HP before and after each apply so `delta` reflects the
+   * actual reduction (after IWR/resistance/temp HP), not the requested amount.
    */
   apply_damage: async (params = {}) => {
     const { damages } = params;
@@ -3078,20 +3124,27 @@ const handlers = {
     const dispatcher = DISPATCHERS[systemId];
     if (!dispatcher || !dispatcher.applyDamage) throw new Error(`System "${systemId}" does not support apply_damage.`);
 
+    const readHP = (a) => a.system.attributes?.hp?.value ?? a.system.hp?.value ?? a.system.health?.value ?? null;
+
     const appliedResults = [];
     for (const d of damages) {
       const { targetId, amount, type, multiplier = 1 } = d;
       const actor = game.actors.get(targetId) || game.actors.getName(targetId) || canvas.tokens.get(targetId)?.actor;
       if (!actor) {
         console.warn(`apply_damage: Target "${targetId}" not found`);
+        appliedResults.push({ targetId, error: "target not found" });
         continue;
       }
 
+      const hpBefore = readHP(actor);
       const res = await dispatcher.applyDamage(actor, { amount, type, multiplier });
+      const hpAfter  = readHP(actor);
+      const computedDelta = (hpBefore != null && hpAfter != null) ? (hpBefore - hpAfter) : null;
+
       appliedResults.push({
         targetId,
-        delta: res.delta ?? (amount * multiplier),
-        newHP: res.newHP ?? (actor.system.attributes?.hp?.value || actor.system.hp?.value),
+        delta:           res?.delta ?? computedDelta ?? (amount * multiplier),
+        newHP:           res?.newHP ?? hpAfter,
         finalMultiplier: multiplier
       });
     }
