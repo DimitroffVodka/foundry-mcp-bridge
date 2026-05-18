@@ -92,7 +92,8 @@ Some tools mutate live Foundry state — they will change what GMs and players s
 - Updates: `update_actor`, `update_item_on_actor`, `update_journal_page`, `set_actor_ownership`
 - Reads (counterpart to a write): `get_actor_ownership`
 - Combat (write): `start_combat`, `end_combat`, `advance_combat`
-- Chat / interaction (write): `send_chat_message`, `request_roll`
+- Chat / interaction (write): `send_chat_message`, `request_roll`, `request_roll_typed`
+- Combat / Native rolls (write): `request_attack_roll`, `request_damage_roll`, `request_item_use`, `apply_damage`
 - Deletes (permanent — Foundry has no undo for these): `delete_folder`, `delete_actor`, `delete_items_from_actor`, `delete_journal_entry`, `delete_journal_page`
 
 The reads `get_combat` and `get_chat_messages` are NOT gated — they're available regardless of `FOUNDRY_MCP_ALLOW_WRITE`.

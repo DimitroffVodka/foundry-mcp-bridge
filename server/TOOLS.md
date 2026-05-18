@@ -684,6 +684,47 @@ Read the current ownership map of an actor with friendly level names.
 
 ---
 
+## Typed rolls + item use (opt-in: FOUNDRY_MCP_ALLOW_WRITE=1)
+
+These tools use system-native APIs to handle modifiers, advantage, and formatting correctly. Supported systems: `dnd5e`, `pf2e`, `shadowdark`, `vagabond`.
+
+### `request_roll_typed`
+Triggers a system-native roll (Skill, Ability, or Save) on an actor. Normalizes the result into a canonical shape.
+- **actorId**: ID or name of the actor.
+- **type**: `skill`, `ability`, or `save`.
+- **identifier**: System-specific slug (e.g., `ath` for 5e Athletics, `fortitude` for PF2e).
+- **dc**: (Optional) Target number for success evaluation.
+- **adv**: (Optional) `advantage`, `disadvantage`, or `normal`.
+- **fastForward**: (Optional) Bypass dialogs (default true).
+
+### `request_attack_roll`
+Triggers only the attack roll part of an item's workflow.
+- **actorId**: ID or name of the actor.
+- **itemId**: ID or name of the weapon/spell.
+- **adv**: (Optional) Advantage state.
+- **fastForward**: (Optional) default true.
+
+### `request_damage_roll`
+Triggers the damage roll for an item. The caller must provide critical state.
+- **actorId**: ID or name of the actor.
+- **itemId**: ID or name of the weapon/spell.
+- **isCritical**: (Optional) Force critical damage.
+
+### `request_item_use`
+The recommended tool for combat. Executes a full workflow: Attack -> (on hit) -> Damage -> (optional) Apply.
+- **actorId**: ID or name of the actor using the item.
+- **itemId**: ID or name of the item.
+- **targetIds**: (Optional) Apply damage to these IDs if the attack hits.
+- **adv**: (Optional) Advantage state for the attack.
+- **Returns**: A chained result object containing attack, damage, and application details.
+
+### `apply_damage`
+Applies damage to one or more targets with mixed outcomes (e.g., fireball with some targets saving).
+- **damages**: Array of `{ targetId, amount, type?, multiplier? }`.
+- **multiplier**: 0 for immune, 0.5 for save-for-half, 1 for full, 2 for vulnerability.
+
+---
+
 ## Patterns & workflows
 
 **Discovery flow** — "what's happening?":

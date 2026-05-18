@@ -346,4 +346,69 @@ export function registerWorldAuthoringTools(mcp) {
       const bridgeTimeoutMs = Math.max(15_000, (timeoutSeconds + 5) * 1000);
       return callFoundry("request_roll", { ...rest, timeoutSeconds }, targetUser, bridgeTimeoutMs);
     });
+
+  // --- Typed roll (v0.10.0) ---
+  registerRoutedTool(mcp, "request_roll_typed",
+    "Triggers a system-native roll (Skill, Ability, or Save) on an actor. "
+    + "This handles system-specific modifiers and formatting.",
+    {
+      actorId:     z.string().describe("Actor ID or name."),
+      type:        z.enum(["skill", "ability", "save"]).describe("Category of the roll."),
+      identifier:  z.string().describe("System-specific ID for the roll (e.g. 'ath' for 5e Athletics)."),
+      dc:          z.number().optional().describe("Target DC for success evaluation."),
+      adv:         z.enum(["normal", "advantage", "disadvantage"]).optional().describe("Force advantage state."),
+      fastForward: z.boolean().optional().describe("Bypass dialogs (default true)."),
+    });
+
+  // --- Attack roll (v0.10.0) ---
+  registerRoutedTool(mcp, "request_attack_roll",
+    "Triggers only the attack roll part of an item's workflow.",
+    {
+      actorId:     z.string().describe("Actor ID or name."),
+      itemId:      z.string().describe("Item/weapon ID or name."),
+      adv:         z.enum(["normal", "advantage", "disadvantage"]).optional().describe("Force advantage state."),
+      fastForward: z.boolean().optional().describe("Bypass dialogs (default true)."),
+    });
+
+  // --- Damage roll (v0.10.0) ---
+  registerRoutedTool(mcp, "request_damage_roll",
+    "Triggers the damage roll for an item. The caller must provide critical state.",
+    {
+      actorId:     z.string().describe("Actor ID or name."),
+      itemId:      z.string().describe("Item/weapon ID or name."),
+      isCritical:  z.boolean().optional().describe("Force critical damage."),
+      fastForward: z.boolean().optional().describe("Bypass dialogs (default true)."),
+    });
+
+  // --- Item use: Full Flow (v0.10.0) ---
+  registerRawTool(mcp, "request_item_use",
+    "Executes a full attack-and-damage workflow. Attack -> Hit? -> Damage -> Apply. "
+    + "This is the recommended tool for combat actions.",
+    {
+      actorId:     z.string().describe("Actor ID or name."),
+      itemId:      z.string().describe("Item/weapon ID or name."),
+      targetIds:   z.array(z.string()).optional().describe("Apply damage to these target IDs on hit."),
+      activityId:  z.string().optional().describe("D&D 5e specific activity ID."),
+      adv:         z.enum(["normal", "advantage", "disadvantage"]).optional().describe("Force advantage state."),
+      fastForward: z.boolean().optional().describe("Bypass dialogs (default true)."),
+      targetUser:  z.string().optional().describe(TARGET_USER_DESC),
+    },
+    async (params) => {
+      const { targetUser, targetIds = [], ...rest } = params;
+      // Allow 10s base + 5s per target for potentially slow damage applications
+      const bridgeTimeoutMs = Math.max(15_000, 10_000 + (targetIds.length * 5000));
+      return callFoundry("request_item_use", { ...rest, targetIds }, targetUser, bridgeTimeoutMs);
+    });
+
+  // --- Apply damage (v0.10.0) ---
+  registerRoutedTool(mcp, "apply_damage",
+    "Applies damage to one or more targets with mixed outcomes (AoE support).",
+    {
+      damages: z.array(z.object({
+        targetId:   z.string().describe("Target actor/token ID."),
+        amount:     z.number().describe("Total damage value."),
+        type:       z.string().optional().describe("Damage type (e.g. 'fire')."),
+        multiplier: z.number().optional().describe("Multiplier (e.g. 0.5 for half)."),
+      })).describe("Per-target damage descriptors."),
+    });
 }

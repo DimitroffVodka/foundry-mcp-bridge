@@ -654,6 +654,246 @@ async function _resolveFolder(type, folderId, folderName, autoCreate = true) {
 }
 
 // ---------------------------------------------------------------------------
+// Per-system dispatchers for native roll APIs (v0.10.0)
+// ---------------------------------------------------------------------------
+
+/**
+ * Dispatch table for system-specific roll logic. Each system implementation
+ * maps generic concepts (rollSkill, rollAttack) to its own native methods.
+ * v0.10.0 covers: dnd5e, pf2e, shadowdark, vagabond.
+ */
+const DISPATCHERS = {
+  dnd5e: {
+    rollSkill: (actor, { identifier, target, adv }) => {
+      const config = { target };
+      if (adv === "advantage") config.advantage = true;
+      if (adv === "disadvantage") config.disadvantage = true;
+      return actor.rollSkill(identifier, config, { configure: false });
+    },
+    rollAbility: (actor, { identifier, target, adv }) => {
+      const config = { target };
+      if (adv === "advantage") config.advantage = true;
+      if (adv === "disadvantage") config.disadvantage = true;
+      return actor.rollAbilityCheck(identifier, config, { configure: false });
+    },
+    rollSave: (actor, { identifier, target, adv }) => {
+      const config = { target };
+      if (adv === "advantage") config.advantage = true;
+      if (adv === "disadvantage") config.disadvantage = true;
+      return actor.rollSavingThrow(identifier, config, { configure: false });
+    },
+    rollAttack: async (actor, item, { activityId, adv }) => {
+      const activity = activityId ? item.system.activities.get(activityId) : item.system.activities.find(a => a.type === "attack");
+      if (!activity) throw new Error(`No attack activity found on item "${item.id}"`);
+      const config = {};
+      if (adv === "advantage") config.advantage = true;
+      if (adv === "disadvantage") config.disadvantage = true;
+      return { roll: await activity.rollAttack(config, { configure: false }), activity };
+    },
+    rollDamage: (activity, { isCritical }) => {
+      const config = isCritical ? { rollMode: "critical" } : {};
+      return activity.rollDamage(config, { configure: false });
+    },
+    applyDamage: (actor, { amount, type, multiplier = 1 }) => {
+      return actor.applyDamage([{ value: amount, type }], { multiplier });
+    }
+  },
+
+  pf2e: {
+    rollSkill: (actor, { identifier, target }) => {
+      const stat = actor.skills[identifier] || actor[identifier];
+      if (!stat?.roll) throw new Error(`Skill/Statistic "${identifier}" not found on actor`);
+      return stat.roll({ dc: target ? { value: target } : undefined, skipDialog: true });
+    },
+    rollAbility: (actor, { identifier, target }) => {
+      const stat = actor.abilities[identifier];
+      if (!stat?.roll) throw new Error(`Ability "${identifier}" not found on actor`);
+      return stat.roll({ dc: target ? { value: target } : undefined, skipDialog: true });
+    },
+    rollSave: (actor, { identifier, target }) => {
+      const stat = actor.saves[identifier];
+      if (!stat?.roll) throw new Error(`Save "${identifier}" not found on actor`);
+      return stat.roll({ dc: target ? { value: target } : undefined, skipDialog: true });
+    },
+    rollAttack: async (actor, item) => {
+      const strike = actor.system.actions.find(a => a.item.id === item.id);
+      if (!strike) throw new Error(`No Strike found for item "${item.id}"`);
+      return { roll: await strike.variants[0].roll({ skipDialog: true }), strike };
+    },
+    rollDamage: (strike, { isCritical }) => {
+      return isCritical ? strike.critical({ skipDialog: true }) : strike.damage({ skipDialog: true });
+    },
+    applyDamage: (actor, { amount, type }) => {
+      return actor.applyDamage({ damage: amount, rollOptions: type ? new Set([`damage:type:${type}`]) : new Set() });
+    }
+  },
+
+  shadowdark: {
+    rollSkill: (actor, { identifier, target, adv }) => {
+      const config = { target, skipPrompt: true };
+      if (adv === "advantage") config.advantage = 1;
+      if (adv === "disadvantage") config.advantage = -1;
+      return actor.system.rollStatCheck(identifier, config);
+    },
+    rollAbility: (actor, { identifier, target, adv }) => {
+      const config = { target, skipPrompt: true };
+      if (adv === "advantage") config.advantage = 1;
+      if (adv === "disadvantage") config.advantage = -1;
+      return actor.system.rollStatCheck(identifier, config);
+    },
+    rollSave: (actor, { identifier, target, adv }) => {
+      const config = { target, skipPrompt: true };
+      if (adv === "advantage") config.advantage = 1;
+      if (adv === "disadvantage") config.advantage = -1;
+      return actor.system.rollStatCheck(identifier, config);
+    },
+    rollAttack: async (actor, item, { adv }) => {
+      const config = { skipPrompt: true };
+      if (adv === "advantage") config.advantage = 1;
+      if (adv === "disadvantage") config.advantage = -1;
+      const idOrUuid = actor.type === "npc" ? item.id : item.uuid;
+      return { roll: await actor.system.rollAttack(idOrUuid, config), actor, itemUuid: idOrUuid };
+    },
+    rollDamage: (actor, { itemUuid }) => {
+      return actor.system.rollDamage(itemUuid, { skipPrompt: true });
+    },
+    applyDamage: (actor, { amount, multiplier = 1 }) => {
+      return actor.applyDamage(amount, multiplier);
+    }
+  },
+
+  vagabond: {
+    rollSkill: (actor, { identifier }) => {
+      return game.vagabond.api.VagabondRollBuilder.buildAndEvaluateD20(actor, 'none');
+    },
+    rollAbility: (actor, { identifier }) => {
+      return game.vagabond.api.VagabondRollBuilder.buildAndEvaluateD20(actor, 'none');
+    },
+    rollSave: (actor, { identifier }) => {
+      return game.vagabond.api.VagabondRollBuilder.buildAndEvaluateD20(actor, 'none');
+    },
+    rollAttack: async (actor, item) => {
+      return { roll: await item.rollAttack(actor, 'none'), item, actor };
+    },
+    rollDamage: (item, { isCritical, actor }) => {
+      return item.rollDamage(actor, isCritical);
+    },
+    applyDamage: async (actor, { amount }) => {
+      const currentHP = actor.system.health.value;
+      const newHP = Math.max(0, currentHP - amount);
+      await actor.update({ 'system.health.value': newHP });
+      if (game.vagabond.api.VagabondChatCard) {
+        await game.vagabond.api.VagabondChatCard.applyResult(actor, {
+          type: 'damage',
+          rawAmount: amount,
+          finalAmount: amount,
+          previousValue: currentHP,
+          newValue: newHP,
+        });
+      }
+      return { delta: amount, newHP };
+    }
+  }
+};
+
+/**
+ * Normalise a generic roll result into the canonical MCP shape.
+ */
+function _normalizeRollResult(systemId, rawRoll, actor, dc) {
+  const roll = Array.isArray(rawRoll) ? rawRoll[0] : rawRoll;
+  if (!roll) return null;
+
+  const result = {
+    system: systemId,
+    total: roll.total,
+    formula: roll.formula,
+    rolledBy: actor.name,
+    dice: (roll.dice ?? []).map(d => ({
+      faces: d.faces,
+      results: (d.results ?? []).map(r => r.result)
+    }))
+  };
+
+  if (dc != null) {
+    if (systemId === "pf2e") {
+      result.success = roll.degreeOfSuccess >= 2;
+    } else {
+      result.success = roll.total >= dc;
+    }
+  }
+
+  if (systemId === "pf2e") {
+    result.degreeOfSuccess = roll.degreeOfSuccess;
+  } else if (roll.isCritical !== undefined) {
+    result.isCritical = roll.isCritical;
+  } else if (roll.options?.critical) {
+    result.isCritical = true;
+  }
+
+  return result;
+}
+
+/**
+ * Normalise an attack roll into the canonical shape, computing 'hit'.
+ */
+function _normalizeAttackResult(systemId, rawRoll, targetAC) {
+  const roll = Array.isArray(rawRoll) ? rawRoll[0] : rawRoll;
+  if (!roll) return null;
+
+  const result = {
+    system: systemId,
+    total: roll.total,
+    formula: roll.formula,
+    targetAC: targetAC
+  };
+
+  if (systemId === "pf2e") {
+    result.degreeOfSuccess = roll.degreeOfSuccess;
+    result.hit = roll.degreeOfSuccess >= 2;
+  } else {
+    result.isCritical = roll.isCritical || !!roll.options?.critical;
+    result.hit = result.isCritical || (targetAC != null && roll.total >= targetAC);
+  }
+
+  return result;
+}
+
+/**
+ * Normalise a damage roll, extracting per-type breakdown if available.
+ */
+function _normalizeDamageResult(systemId, rawRoll, isCritical) {
+  const roll = Array.isArray(rawRoll) ? rawRoll[0] : rawRoll;
+  if (!roll) return null;
+
+  const types = [];
+  // dnd5e: try to find types in terms
+  if (systemId === "dnd5e" && Array.isArray(roll.terms)) {
+    for (const term of roll.terms) {
+      if (term.options?.flavor) {
+        types.push({ amount: term.total, type: term.options.flavor });
+      }
+    }
+  }
+  // pf2e: try to find instances
+  if (systemId === "pf2e" && Array.isArray(roll.instances)) {
+    for (const inst of roll.instances) {
+      types.push({ amount: inst.total, type: inst.type });
+    }
+  }
+
+  if (types.length === 0) {
+    types.push({ amount: roll.total, type: "total" });
+  }
+
+  return {
+    total: roll.total,
+    formula: roll.formula,
+    isCritical: !!isCritical,
+    types
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Request handlers — each returns serialisable data
 // ---------------------------------------------------------------------------
 const handlers = {
@@ -2673,6 +2913,190 @@ const handlers = {
       });
       dialog.render(true);
     });
+  },
+
+  // -------------------------------------------------------------------------
+  // Typed rolls + item use (v0.10.0). Same write gate.
+  // -------------------------------------------------------------------------
+
+  /**
+   * Triggers a system-native roll (Skill, Ability, or Save) on an actor.
+   * Normalises the result into a canonical MCP shape.
+   */
+  request_roll_typed: async (params = {}) => {
+    const { actorId, type, identifier, dc, adv, fastForward = true } = params;
+    if (!actorId || !type || !identifier) throw new Error("`actorId`, `type`, and `identifier` are required");
+
+    const actor = game.actors.get(actorId) || game.actors.getName(actorId);
+    if (!actor) throw new Error(`Actor "${actorId}" not found`);
+
+    const systemId = game.system.id;
+    const dispatcher = DISPATCHERS[systemId];
+    if (!dispatcher) throw new Error(`System "${systemId}" not supported for typed rolls. Use request_roll.`);
+
+    let result;
+    if (type === "skill") result = await dispatcher.rollSkill(actor, { identifier, target: dc, adv });
+    else if (type === "ability") result = await dispatcher.rollAbility(actor, { identifier, target: dc, adv });
+    else if (type === "save") result = await dispatcher.rollSave(actor, { identifier, target: dc, adv });
+    else throw new Error(`Unknown roll type "${type}". Use "skill", "ability", or "save".`);
+
+    return _normalizeRollResult(systemId, result, actor, dc);
+  },
+
+  /**
+   * Triggers only the attack roll part of an item's workflow.
+   */
+  request_attack_roll: async (params = {}) => {
+    const { actorId, itemId, fastForward = true, adv } = params;
+    if (!actorId || !itemId) throw new Error("`actorId` and `itemId` are required");
+
+    const actor = game.actors.get(actorId) || game.actors.getName(actorId);
+    if (!actor) throw new Error(`Actor "${actorId}" not found`);
+
+    const item = actor.items.get(itemId) || actor.items.getName(itemId);
+    if (!item) throw new Error(`Item "${itemId}" not found on actor "${actor.name}"`);
+
+    const systemId = game.system.id;
+    const dispatcher = DISPATCHERS[systemId];
+    if (!dispatcher || !dispatcher.rollAttack) throw new Error(`System "${systemId}" not supported for attack rolls.`);
+
+    const { roll } = await dispatcher.rollAttack(actor, item, { adv });
+    
+    // Try to get target AC from current targets
+    let targetAC = null;
+    const target = game.user.targets.first();
+    if (target?.actor) {
+      targetAC = target.actor.system.attributes?.ac?.value ?? target.actor.system.ac?.value;
+    }
+
+    return _normalizeAttackResult(systemId, roll, targetAC);
+  },
+
+  /**
+   * Triggers the damage roll for an item.
+   */
+  request_damage_roll: async (params = {}) => {
+    const { actorId, itemId, isCritical, fastForward = true } = params;
+    if (!actorId || !itemId) throw new Error("`actorId` and `itemId` are required");
+
+    const actor = game.actors.get(actorId) || game.actors.getName(actorId);
+    if (!actor) throw new Error(`Actor "${actorId}" not found`);
+
+    const item = actor.items.get(itemId) || actor.items.getName(itemId);
+    if (!item) throw new Error(`Item "${itemId}" not found on actor "${actor.name}"`);
+
+    const systemId = game.system.id;
+    const dispatcher = DISPATCHERS[systemId];
+    if (!dispatcher || !dispatcher.rollDamage) throw new Error(`System "${systemId}" not supported for damage rolls.`);
+
+    // Resolve context needed for damage (differs by system)
+    let context;
+    if (systemId === "dnd5e") {
+      const attackRes = await dispatcher.rollAttack(actor, item, {});
+      context = attackRes.activity;
+    } else if (systemId === "pf2e") {
+      context = dispatcher.getStrike(actor, itemId);
+    } else if (systemId === "shadowdark") {
+      context = { itemUuid: actor.type === "npc" ? item.id : item.uuid };
+    } else if (systemId === "vagabond") {
+      context = { isCritical, actor, item };
+    }
+
+    const roll = await (systemId === "vagabond" ? dispatcher.rollDamage(context.item, context) : dispatcher.rollDamage(context, { isCritical }));
+    
+    return _normalizeDamageResult(systemId, roll, isCritical);
+  },
+
+  /**
+   * Executes a full attack-and-damage workflow (v0.10.0 Full Flow).
+   */
+  request_item_use: async (params = {}) => {
+    const { actorId, itemId, targetIds, activityId, fastForward = true, adv } = params;
+    if (!actorId || !itemId) throw new Error("`actorId` and `itemId` are required");
+
+    const actor = game.actors.get(actorId) || game.actors.getName(actorId);
+    if (!actor) throw new Error(`Actor "${actorId}" not found`);
+
+    const item = actor.items.get(itemId) || actor.items.getName(itemId);
+    if (!item) throw new Error(`Item "${itemId}" not found on actor "${actor.name}"`);
+
+    const systemId = game.system.id;
+    const dispatcher = DISPATCHERS[systemId];
+    if (!dispatcher) throw new Error(`System "${systemId}" not supported for item use.`);
+
+    const results = { itemId: item.id };
+
+    // 1. Attack
+    const attackData = await dispatcher.rollAttack(actor, item, { activityId, adv });
+    results.attack = _normalizeAttackResult(systemId, attackData.roll);
+
+    // 2. Damage (if hit)
+    if (results.attack.hit) {
+      let damageRoll;
+      const isCrit = results.attack.isCritical || results.attack.degreeOfSuccess === 3;
+      
+      if (systemId === "dnd5e") {
+        damageRoll = await dispatcher.rollDamage(attackData.activity, { isCritical: isCrit });
+      } else if (systemId === "pf2e") {
+        damageRoll = await dispatcher.rollDamage(attackData.strike, { isCritical: isCrit });
+      } else if (systemId === "shadowdark") {
+        damageRoll = await dispatcher.rollDamage(actor, attackData);
+      } else if (systemId === "vagabond") {
+        damageRoll = await dispatcher.rollDamage(item, { isCritical: isCrit, actor });
+      }
+      
+      results.damage = _normalizeDamageResult(systemId, damageRoll, isCrit);
+
+      // 3. Apply (if targetIds provided)
+      if (Array.isArray(targetIds) && targetIds.length > 0) {
+        results.applied = [];
+        for (const tid of targetIds) {
+          const tactor = game.actors.get(tid) || game.actors.getName(tid) || canvas.tokens.get(tid)?.actor;
+          if (tactor) {
+            const applyRes = await dispatcher.applyDamage(tactor, { amount: results.damage.total });
+            results.applied.push({ 
+              targetId: tid, 
+              delta: applyRes.delta ?? results.damage.total, 
+              newHP: applyRes.newHP ?? (tactor.system.attributes?.hp?.value || tactor.system.hp?.value) 
+            });
+          }
+        }
+      }
+    }
+
+    return results;
+  },
+
+  /**
+   * Applies damage to one or more targets with mixed outcomes (AoE support).
+   */
+  apply_damage: async (params = {}) => {
+    const { damages } = params;
+    if (!Array.isArray(damages)) throw new Error("`damages` must be an array of per-target damage objects");
+
+    const systemId = game.system.id;
+    const dispatcher = DISPATCHERS[systemId];
+    if (!dispatcher || !dispatcher.applyDamage) throw new Error(`System "${systemId}" does not support apply_damage.`);
+
+    const appliedResults = [];
+    for (const d of damages) {
+      const { targetId, amount, type, multiplier = 1 } = d;
+      const actor = game.actors.get(targetId) || game.actors.getName(targetId) || canvas.tokens.get(targetId)?.actor;
+      if (!actor) {
+        console.warn(`apply_damage: Target "${targetId}" not found`);
+        continue;
+      }
+
+      const res = await dispatcher.applyDamage(actor, { amount, type, multiplier });
+      appliedResults.push({
+        targetId,
+        delta: res.delta ?? (amount * multiplier),
+        newHP: res.newHP ?? (actor.system.attributes?.hp?.value || actor.system.hp?.value),
+        finalMultiplier: multiplier
+      });
+    }
+
+    return { applied: appliedResults };
   }
 };
 
