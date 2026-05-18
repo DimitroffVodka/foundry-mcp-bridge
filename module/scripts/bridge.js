@@ -762,18 +762,75 @@ const DISPATCHERS = {
       if (adv === "disadvantage") config.advantage = -1;
       return actor.system.rollStatCheck(identifier, config);
     },
+    // Shadowdark's actor.system.rollAttack ALWAYS shows a dialog and doesn't
+    // return the rolled result programmatically — it just posts to chat. For
+    // NPC Attacks the system also has no separate rollDamage. To support
+    // programmatic attack/damage rolls we build the formulas directly from
+    // the item data and evaluate them ourselves. Crit detection is based on
+    // the d20 face matching the configured successThreshold.
     rollAttack: async (actor, item, { adv }) => {
+      const isNpc = actor.type?.toLowerCase() === "npc";
+      if (isNpc) {
+        // NPC Attack item: build `1d20 + attackBonus` and roll directly.
+        const attackBonus = item.system?.bonuses?.attackBonus ?? 0;
+        const critSuccess = item.system?.bonuses?.critical?.successThreshold ?? 20;
+        let d20 = "1d20";
+        if (adv === "advantage")    d20 = "2d20kh1";
+        if (adv === "disadvantage") d20 = "2d20kl1";
+        const formula = `${d20} + ${attackBonus}`;
+        const roll = await new Roll(formula).evaluate();
+        // Stamp isCritical flag based on the natural d20 face.
+        const d20Term = roll.dice[0];
+        const natural = d20Term?.results?.find(r => r.active)?.result ?? d20Term?.total;
+        roll.isCritical = natural >= critSuccess;
+        await roll.toMessage({
+          speaker: ChatMessage.getSpeaker({ actor }),
+          flavor: `${item.name} (attack)`
+        });
+        return { roll, actor, item, isNpc: true };
+      }
+      // Player path — keep the dialog-driven system flow; programmatic returns
+      // are limited and may need follow-up work for full coverage.
       const config = { skipPrompt: true };
       if (adv === "advantage") config.advantage = 1;
       if (adv === "disadvantage") config.advantage = -1;
-      const idOrUuid = actor.type === "npc" ? item.id : item.uuid;
-      return { roll: await actor.system.rollAttack(idOrUuid, config), actor, itemUuid: idOrUuid };
+      return { roll: await actor.system.rollAttack(item.uuid, config), actor, item, isNpc: false };
     },
-    rollDamage: (actor, { itemUuid }) => {
+    rollDamage: async (actor, ctx) => {
+      const { item, isCritical } = ctx;
+      const isNpc = (ctx.isNpc ?? actor?.type?.toLowerCase() === "npc");
+      if (isNpc && item) {
+        const damageFormula = item.system?.damage?.value ?? "0";
+        const damageBonus   = item.system?.bonuses?.damageBonus ?? 0;
+        const critMult      = item.system?.bonuses?.critical?.multiplier ?? 2;
+        // Crit doubles the dice count (standard d20-system convention).
+        const base = isCritical
+          ? damageFormula.replace(/(\d+)d(\d+)/g, (_, n, faces) => `${parseInt(n, 10) * critMult}d${faces}`)
+          : damageFormula;
+        const formula = `${base}${damageBonus ? ` + ${damageBonus}` : ""}`;
+        const roll = await new Roll(formula).evaluate();
+        await roll.toMessage({
+          speaker: ChatMessage.getSpeaker({ actor }),
+          flavor: `${item.name} (damage${isCritical ? " — critical" : ""})`
+        });
+        return roll;
+      }
+      // Player-side falls back to the system's rollDamage if it exists.
+      const itemUuid = ctx.itemUuid ?? item?.uuid;
+      if (!actor?.system?.rollDamage) throw new Error("Shadowdark Player damage path unavailable — actor.system.rollDamage missing");
       return actor.system.rollDamage(itemUuid, { skipPrompt: true });
     },
-    applyDamage: (actor, { amount, multiplier = 1 }) => {
-      return actor.applyDamage(amount, multiplier);
+    // Shadowdark's actor.applyDamage(amount, multiplier) may not return a
+    // Promise that awaits the underlying actor.update, so hpAfter reads can
+    // be stale. Compute the delta authoritatively from the captured before
+    // value and the system's clamp formula, and await the explicit update
+    // so the caller sees a fully-propagated HP value.
+    applyDamage: async (actor, { amount, multiplier = 1 }) => {
+      const before = actor.system.attributes?.hp?.value ?? 0;
+      const max    = actor.system.attributes?.hp?.max   ?? before;
+      const newValue = Math.max(0, Math.min(max, before - (amount * multiplier)));
+      await actor.update({ "system.attributes.hp.value": newValue });
+      return { delta: before - newValue, newHP: newValue };
     }
   },
 
@@ -3022,8 +3079,9 @@ const handlers = {
       const strike = dispatcher.getStrike(actor, item.id);
       roll = await dispatcher.rollDamage(strike, { isCritical });
     } else if (systemId === "shadowdark") {
-      const itemUuid = actor.type === "npc" ? item.id : item.uuid;
-      roll = await dispatcher.rollDamage(actor, { itemUuid });
+      // New shadowdark dispatcher needs item + crit flag (for the NPC-attack
+      // direct-formula path) rather than the legacy itemUuid shape.
+      roll = await dispatcher.rollDamage(actor, { item, isCritical });
     } else if (systemId === "vagabond") {
       roll = await dispatcher.rollDamage(item, { isCritical, actor });
     } else {
@@ -3082,7 +3140,7 @@ const handlers = {
       } else if (systemId === "pf2e") {
         damageRoll = await dispatcher.rollDamage(attackData.strike, { isCritical: isCrit });
       } else if (systemId === "shadowdark") {
-        damageRoll = await dispatcher.rollDamage(actor, { itemUuid: attackData.itemUuid });
+        damageRoll = await dispatcher.rollDamage(actor, { item, isCritical: isCrit, isNpc: attackData.isNpc });
       } else if (systemId === "vagabond") {
         damageRoll = await dispatcher.rollDamage(item, { isCritical: isCrit, actor });
       }
