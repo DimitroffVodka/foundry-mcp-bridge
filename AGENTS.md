@@ -91,7 +91,13 @@ Some tools mutate live Foundry state — they will change what GMs and players s
 - Creates: `create_folder`, `create_actor`, `create_actor_from_compendium`, `add_items_to_actor`, `create_journal_entry`, `add_page_to_journal_entry`, `create_token`
 - Updates: `update_actor`, `update_item_on_actor`, `update_journal_page`, `set_actor_ownership`
 - Reads (counterpart to a write): `get_actor_ownership`
+- Combat (write): `start_combat`, `end_combat`, `advance_combat`
+- Chat / interaction (write): `send_chat_message`, `request_roll`
 - Deletes (permanent — Foundry has no undo for these): `delete_folder`, `delete_actor`, `delete_items_from_actor`, `delete_journal_entry`, `delete_journal_page`
+
+The reads `get_combat` and `get_chat_messages` are NOT gated — they're available regardless of `FOUNDRY_MCP_ALLOW_WRITE`.
+
+For `request_roll`: it pops a Foundry dialog on the target user's screen. If you target a player without an active browser, the dialog never shows and the call times out. Use `autoAccept: true` for tests or when you specifically want the GM to roll without confirming.
 
 If they're not in your tool list, the server's write gate is off and that's intentional; tell the user to set the env var rather than retrying. Before any delete, prefer reading the document with `get_actor` / `list_journals` / etc. first so you can confirm you're nuking the right thing — there is no recovery.
 

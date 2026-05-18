@@ -23,8 +23,12 @@ export const pendingRequests = new Map();
  * Send a JSON-RPC-shaped request to a Foundry bridge and return a Promise
  * that resolves with the bridge's `data` payload (or rejects on error /
  * timeout / disconnect).
+ *
+ * `timeoutMs` overrides the default REQUEST_TIMEOUT for this call only.
+ * Used by tools that legitimately need to wait longer (e.g. `request_roll`
+ * waiting for a player to click the dialog button).
  */
-export function requestFoundry(tool, params = {}, targetUser) {
+export function requestFoundry(tool, params = {}, targetUser, timeoutMs = REQUEST_TIMEOUT) {
   return new Promise((resolve, reject) => {
     let bridge;
     try { bridge = routeBridge(targetUser); }
@@ -37,8 +41,8 @@ export function requestFoundry(tool, params = {}, targetUser) {
     const id    = randomUUID();
     const timer = setTimeout(() => {
       pendingRequests.delete(id);
-      reject(new Error(`Request to Foundry timed out after ${REQUEST_TIMEOUT / 1000}s`));
-    }, REQUEST_TIMEOUT);
+      reject(new Error(`Request to Foundry timed out after ${timeoutMs / 1000}s`));
+    }, timeoutMs);
 
     pendingRequests.set(id, { resolve, reject, timer, socket: bridge.socket });
     bridge.socket.send(JSON.stringify({ id, tool, params }));
@@ -47,10 +51,10 @@ export function requestFoundry(tool, params = {}, targetUser) {
 
 /**
  * Standard text-content wrapper. Pretty-JSON the result if it isn't already
- * a string. Most tool handlers use this.
+ * a string. Most tool handlers use this. `timeoutMs` passes through.
  */
-export async function callFoundry(tool, params = {}, targetUser) {
-  const data = await requestFoundry(tool, params, targetUser);
+export async function callFoundry(tool, params = {}, targetUser, timeoutMs) {
+  const data = await requestFoundry(tool, params, targetUser, timeoutMs);
   const text = typeof data === "string" ? data : JSON.stringify(data, null, 2);
   return { content: [{ type: "text", text }] };
 }

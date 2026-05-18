@@ -10,9 +10,10 @@
  * connected. The actual create/update calls run in the targeted user's
  * browser context with that user's permissions.
  */
-import { z }                  from "zod";
-import { registerRoutedTool } from "./_helpers.js";
-import { ALLOW_WRITE }        from "../lib/config.js";
+import { z }                                     from "zod";
+import { registerRoutedTool, registerRawTool, TARGET_USER_DESC } from "./_helpers.js";
+import { callFoundry }                           from "../lib/foundry-rpc.js";
+import { ALLOW_WRITE }                           from "../lib/config.js";
 
 export function registerWorldAuthoringTools(mcp) {
   if (!ALLOW_WRITE) return;
@@ -277,5 +278,72 @@ export function registerWorldAuthoringTools(mcp) {
     + "(NONE/LIMITED/OBSERVER/OWNER) and resolved Foundry user names.",
     {
       actorId: z.string().describe("Actor document id."),
+    });
+
+  // --- Combat: start ---
+  registerRoutedTool(mcp, "start_combat",
+    "Start a combat encounter. Creates one on the current scene if none "
+    + "exists yet. Optionally adds tokens as combatants and rolls initiative "
+    + "before starting.",
+    {
+      tokenIds:       z.array(z.string()).optional().describe("Token ids to add as combatants before starting."),
+      rollInitiative: z.union([z.boolean(), z.enum(["all", "npc"])]).optional().describe(
+        "If true or 'all', roll for every combatant. If 'npc', only roll for NPC combatants. Default: no auto-roll."
+      ),
+    });
+
+  // --- Combat: end ---
+  registerRoutedTool(mcp, "end_combat",
+    "End the active combat encounter (deletes it). The token roster on the "
+    + "scene is unaffected — only the combat tracker entry is removed.",
+    {});
+
+  // --- Combat: advance ---
+  registerRoutedTool(mcp, "advance_combat",
+    "Advance the combat turn. Foundry handles round transitions "
+    + "automatically when wrapping past the last combatant.",
+    {
+      direction: z.enum(["next", "previous"]).optional().describe("Default 'next'."),
+    });
+
+  // --- Chat: send message ---
+  registerRoutedTool(mcp, "send_chat_message",
+    "Send a chat message. Speaker defaults to the routed user (the GM by "
+    + "default). Pass `actorId` or `tokenId` to speak as that document; pass "
+    + "`whisperTo` (userName or array) to make it a whisper.",
+    {
+      content:   z.string().describe("HTML content of the message."),
+      speaker:   z.string().optional().describe("Display alias for the speaker."),
+      actorId:   z.string().optional().describe("Speak as this actor."),
+      tokenId:   z.string().optional().describe("Speak as this token (on the active scene)."),
+      whisperTo: z.union([z.string(), z.array(z.string())]).optional().describe(
+        "User name(s) to whisper to. Other users won't see the message."
+      ),
+      type:      z.union([
+        z.enum(["OOC", "IC", "EMOTE", "WHISPER", "ROLL", "OTHER"]),
+        z.number().int()
+      ]).optional().describe("Message type. Default 'OOC' (out-of-character)."),
+    });
+
+  // --- Roll request (raw — needs longer timeout than the 15s default) ---
+  registerRawTool(mcp, "request_roll",
+    "Pop a Roll dialog on the target user's screen. The user clicks Roll or "
+    + "Cancel; this tool returns when they respond (or after `timeoutSeconds`). "
+    + "Set `autoAccept: true` to skip the dialog and roll immediately — handy "
+    + "for GM-side automation or test scenarios.",
+    {
+      formula:        z.string().describe("Dice formula (e.g. '1d20+5', '2d6', '@abilities.str.mod + 1d20')."),
+      prompt:         z.string().optional().describe("Text shown in the dialog. Default: 'The GM is requesting a roll.'"),
+      label:          z.string().optional().describe("Short label for the dialog title + chat flavor (e.g. 'Perception DC 15')."),
+      timeoutSeconds: z.number().int().min(5).max(300).optional().describe("Dialog wait time. Default 60s, max 300s."),
+      autoAccept:     z.boolean().optional().describe("Skip the dialog and roll immediately. Default false."),
+      targetUser:     z.string().optional().describe(TARGET_USER_DESC),
+    },
+    async (params) => {
+      const { targetUser, timeoutSeconds = 60, ...rest } = params;
+      // Server-side RPC needs a slightly longer timeout than the dialog so
+      // the dialog timeout fires inside the bridge, not at the server layer.
+      const bridgeTimeoutMs = Math.max(15_000, (timeoutSeconds + 5) * 1000);
+      return callFoundry("request_roll", { ...rest, timeoutSeconds }, targetUser, bridgeTimeoutMs);
     });
 }

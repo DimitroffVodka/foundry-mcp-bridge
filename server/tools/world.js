@@ -101,4 +101,28 @@ export function registerWorldTools(mcp) {
       id:   z.string().optional().describe("Macro document ID"),
       name: z.string().optional().describe("Macro name (exact match)"),
     });
+
+  // --- Combat tracker (read) ---
+  registerRoutedTool(mcp, "get_combat",
+    "Get the state of the active combat encounter — round, current turn, "
+    + "and an initiative-sorted combatant list with HP/defeated/hidden flags. "
+    + "Returns `{ active: false }` when no combat is running.",
+    {});
+
+  // --- Chat history (read) ---
+  registerRoutedTool(mcp, "get_chat_messages",
+    "Read chat history with filters. Returns most recent messages up to "
+    + "`limit`, sorted chronologically. Includes resolved roll formulas and "
+    + "totals when present.",
+    {
+      limit:           z.number().int().min(1).max(500).optional().describe("Max messages to return. Default 50."),
+      since:           z.union([z.string(), z.number()]).optional().describe(
+        "Only return messages from this point on. Accepts an ISO timestamp string or epoch ms."
+      ),
+      speaker:         z.string().optional().describe(
+        "Filter by `speaker.alias` (commonly the actor name) or `speaker.actor` (actor id)."
+      ),
+      includeRolls:    z.boolean().optional().describe("Include roll messages. Default true."),
+      includeWhispers: z.boolean().optional().describe("Include whispers. Default false."),
+    });
 }

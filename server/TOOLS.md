@@ -432,6 +432,81 @@ Set the current user's targets. Equivalent to hovering tokens and pressing T. **
 
 ---
 
+## Combat tracker
+
+### `get_combat`
+Read-only view of the active combat encounter. Returns `{ active: false }` when no combat is running.
+
+- **Params**: none.
+- **Returns** (when active):
+  - `id`, `round`, `turn`, `started`, `sceneId`.
+  - `currentCombatant` — `{ id, name, tokenId, actorId, initiative }` of whose turn it is, or `null`.
+  - `combatants` — initiative-sorted array of `{ id, name, tokenId, actorId, initiative, hp, defeated, hidden }`. `hp` is system-specific (probes `system.attributes.hp` then `system.hp`).
+
+### `start_combat` (write — opt-in)
+Start a combat encounter. Creates one on the current scene if none exists, optionally adds combatants and rolls initiative.
+
+- **Params**:
+  - `tokenIds` (optional) — token document ids to add as combatants before starting.
+  - `rollInitiative` (optional) — `true`/`"all"` rolls every combatant; `"npc"` rolls NPCs only; omit or `false` to skip auto-roll.
+- **Returns**: `{ started, combatId, round, combatantCount, currentCombatantId }`. If combat was already in progress: `{ started: false, reason, combatId, round }`.
+
+### `end_combat` (write — opt-in)
+End and delete the active combat encounter. The token roster on the scene is unaffected.
+
+- **Params**: none.
+- **Returns**: `{ id, round, combatantCount, ended: true }`.
+
+### `advance_combat` (write — opt-in)
+Step the combat turn forward or backward. Foundry handles round transitions automatically.
+
+- **Params**: `direction` — `"next"` (default) or `"previous"`.
+- **Returns**: `{ combatId, round, turn, currentCombatant: { id, name, initiative } }`.
+
+---
+
+## Chat
+
+### `get_chat_messages`
+Read chat history with filters. Returns recent messages chronologically.
+
+- **Params**:
+  - `limit` (optional, default 50, max 500) — max messages to return.
+  - `since` (optional) — ISO timestamp string or epoch ms; only messages from that point forward.
+  - `speaker` (optional) — filter by `speaker.alias` (commonly the actor name) or `speaker.actor` (actor id).
+  - `includeRolls` (optional, default `true`).
+  - `includeWhispers` (optional, default `false`).
+- **Returns**: `{ total, returned, messages: [{ id, timestamp, time, type, speaker, content, isRoll, rolls, whisperTo }] }`.
+
+### `send_chat_message` (write — opt-in)
+Send a chat message. Speaker defaults to the routed user (GM by default).
+
+- **Params**:
+  - `content` — HTML body of the message.
+  - `speaker` (optional) — display alias.
+  - `actorId` / `tokenId` (optional) — speak as that document.
+  - `whisperTo` (optional) — userName or array of userNames. Other users won't see it.
+  - `type` (optional) — `"OOC"` (default), `"IC"`, `"EMOTE"`, `"WHISPER"`, `"ROLL"`, `"OTHER"`, or the corresponding integer.
+- **Returns**: `{ id, timestamp, speaker, whisperedTo, contentPreview }`.
+
+### `request_roll` (write — opt-in, interactive)
+Pop a Roll dialog on the target user's screen. The user clicks Roll or Cancel; the tool returns when they respond (or after `timeoutSeconds`). Set `autoAccept: true` to skip the dialog and roll immediately — useful for GM-side automation and tests.
+
+- **Params**:
+  - `formula` — dice formula (e.g. `"1d20+5"`, `"2d6"`, `"@abilities.str.mod + 1d20"`).
+  - `prompt` (optional) — text shown in the dialog. Default: `"The GM is requesting a roll."`
+  - `label` (optional) — short label for dialog title + chat flavor (e.g. `"Perception DC 15"`).
+  - `timeoutSeconds` (optional, default 60, max 300) — dialog wait time. The server-side RPC timeout is set to `timeoutSeconds + 5` so the dialog timeout fires first.
+  - `autoAccept` (optional, default false) — skip dialog, roll immediately.
+- **Returns**:
+  - When rolled: `{ mode: "rolled" | "auto_rolled", formula, total, result, dice: [{ faces, results }] }`.
+  - When cancelled by the user: `{ mode: "cancelled", formula }`.
+  - When the dialog times out: `{ mode: "timed_out", formula }`.
+  - When the dialog is dismissed without clicking a button: `{ mode: "dismissed", formula }`.
+  - On a roll error: `{ mode: "error", formula, error }`.
+
+---
+
 ## World authoring (opt-in: FOUNDRY_MCP_ALLOW_WRITE=1)
 
 These tools **create and modify persistent world data** (actors, items, journals, folders). They are gated behind `FOUNDRY_MCP_ALLOW_WRITE=1` on the server. With the gate off, none of them are registered — they don't appear in any MCP client's tool list and cannot be called.

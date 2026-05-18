@@ -2358,6 +2358,313 @@ const handlers = {
       default: levelName(actor.ownership.default ?? 0),
       users
     };
+  },
+
+  // -------------------------------------------------------------------------
+  // Combat tracking (Tier C). Reads work without ALLOW_WRITE; mutations
+  // require it (gated server-side).
+  // -------------------------------------------------------------------------
+
+  /**
+   * Get the state of the active combat encounter, or `{ active: false }`
+   * when no combat is running.
+   */
+  get_combat: () => {
+    const combat = game.combat;
+    if (!combat) return { active: false };
+
+    const cur = combat.combatant;
+    return {
+      active: true,
+      id: combat.id,
+      round: combat.round,
+      turn: combat.turn,
+      started: combat.started,
+      sceneId: combat.scene?.id ?? null,
+      currentCombatant: cur ? {
+        id: cur.id,
+        name: cur.name,
+        tokenId: cur.tokenId,
+        actorId: cur.actorId,
+        initiative: cur.initiative
+      } : null,
+      combatants: combat.combatants.contents
+        .slice()
+        .sort((a, b) => (b.initiative ?? -Infinity) - (a.initiative ?? -Infinity))
+        .map(c => ({
+          id: c.id,
+          name: c.name,
+          tokenId: c.tokenId,
+          actorId: c.actorId,
+          initiative: c.initiative ?? null,
+          hp: c.actor?.system?.attributes?.hp ?? c.actor?.system?.hp ?? null,
+          defeated: c.defeated,
+          hidden: c.hidden
+        }))
+    };
+  },
+
+  /**
+   * Start a combat encounter. If no combat exists yet, one is created on the
+   * current scene. `tokenIds` (optional) adds those tokens as combatants
+   * before starting. `rollInitiative` can be "all", "npc", or false.
+   */
+  start_combat: async (params = {}) => {
+    const { tokenIds, rollInitiative } = params;
+
+    let combat = game.combat;
+    if (combat?.started) {
+      return { started: false, reason: "Combat already in progress", combatId: combat.id, round: combat.round };
+    }
+
+    if (!combat) {
+      const sceneId = canvas.scene?.id ?? game.scenes.active?.id;
+      if (!sceneId) throw new Error("No active scene to create combat on");
+      combat = await Combat.create({ scene: sceneId });
+      if (!combat) throw new Error("Failed to create combat encounter");
+    }
+
+    if (Array.isArray(tokenIds) && tokenIds.length) {
+      const sceneId = combat.scene?.id;
+      if (!sceneId) throw new Error("Combat has no scene to source tokens from");
+      const combatantsData = tokenIds.map(id => ({ tokenId: id, sceneId }));
+      await combat.createEmbeddedDocuments("Combatant", combatantsData);
+    }
+
+    if (rollInitiative === "all" || rollInitiative === true) {
+      await combat.rollAll();
+    } else if (rollInitiative === "npc") {
+      await combat.rollNPC();
+    }
+
+    await combat.startCombat();
+    return {
+      started: true,
+      combatId: combat.id,
+      round: combat.round,
+      combatantCount: combat.combatants.size,
+      currentCombatantId: combat.combatant?.id ?? null
+    };
+  },
+
+  /** End the active combat encounter (deletes it). */
+  end_combat: async () => {
+    const combat = game.combat;
+    if (!combat) throw new Error("No active combat");
+    const meta = { id: combat.id, round: combat.round, combatantCount: combat.combatants.size };
+    await combat.delete();
+    return { ...meta, ended: true };
+  },
+
+  /**
+   * Advance the combat turn. `direction` defaults to "next"; pass "previous"
+   * to step backward. Foundry handles round transitions automatically.
+   */
+  advance_combat: async (params = {}) => {
+    const { direction = "next" } = params;
+    const combat = game.combat;
+    if (!combat) throw new Error("No active combat");
+    if (!combat.started) throw new Error("Combat not started — call start_combat first");
+
+    if (direction === "next")          await combat.nextTurn();
+    else if (direction === "previous") await combat.previousTurn();
+    else throw new Error(`Unknown direction "${direction}". Use "next" or "previous".`);
+
+    const cur = combat.combatant;
+    return {
+      combatId: combat.id,
+      round: combat.round,
+      turn: combat.turn,
+      currentCombatant: cur ? { id: cur.id, name: cur.name, initiative: cur.initiative } : null
+    };
+  },
+
+  // -------------------------------------------------------------------------
+  // Chat (Tier C). get_chat_messages is read-only; send_chat_message requires
+  // ALLOW_WRITE (gated server-side).
+  // -------------------------------------------------------------------------
+
+  /**
+   * Read chat history with filters. `limit` caps the returned messages
+   * (most recent first by default — call returns them in chronological order).
+   */
+  get_chat_messages: (params = {}) => {
+    const { limit = 50, since, speaker, includeRolls = true, includeWhispers = false } = params;
+
+    let msgs = game.messages.contents;
+
+    if (since) {
+      const sinceMs = typeof since === "string" ? Date.parse(since) : since;
+      if (!Number.isFinite(sinceMs)) throw new Error(`Invalid \`since\` value: ${since}`);
+      msgs = msgs.filter(m => m.timestamp >= sinceMs);
+    }
+    if (speaker) {
+      msgs = msgs.filter(m => m.speaker?.alias === speaker || m.speaker?.actor === speaker);
+    }
+    if (!includeRolls)    msgs = msgs.filter(m => !m.isRoll);
+    if (!includeWhispers) msgs = msgs.filter(m => !m.whisper?.length);
+
+    const slice = msgs.slice(-limit);
+    return {
+      total: msgs.length,
+      returned: slice.length,
+      messages: slice.map(m => ({
+        id: m.id,
+        timestamp: m.timestamp,
+        time: new Date(m.timestamp).toISOString(),
+        type: m.type,
+        speaker: m.speaker,
+        content: m.content,
+        isRoll: m.isRoll,
+        rolls: (m.rolls ?? []).map(r => ({ formula: r.formula, total: r.total, diceCount: r.dice?.length ?? 0 })),
+        whisperTo: (m.whisper ?? []).map(uid => game.users.get(uid)?.name ?? uid)
+      }))
+    };
+  },
+
+  /**
+   * Send a chat message. Speaker resolves from actorId/tokenId/alias, or
+   * defaults to the current Foundry user (the routed user). `whisperTo`
+   * accepts a userName or array of userNames.
+   */
+  send_chat_message: async (params = {}) => {
+    const { content, speaker, actorId, tokenId, whisperTo, type } = params;
+    if (!content) throw new Error("`content` is required");
+
+    const data = { content };
+
+    if (typeof type === "string") {
+      const t = CONST.CHAT_MESSAGE_STYLES?.[type.toUpperCase()] ?? CONST.CHAT_MESSAGE_TYPES?.[type.toUpperCase()];
+      if (t !== undefined) data.type = t;
+    } else if (typeof type === "number") {
+      data.type = type;
+    }
+
+    // Speaker
+    if (speaker || actorId || tokenId) {
+      const sp = {};
+      if (actorId) {
+        const actor = game.actors.get(actorId);
+        if (!actor) throw new Error(`Actor "${actorId}" not found`);
+        sp.actor = actor.id;
+        sp.alias = speaker ?? actor.name;
+      }
+      if (tokenId) {
+        const scene = canvas.scene ?? game.scenes.active;
+        const token = scene?.tokens.get(tokenId);
+        if (!token) throw new Error(`Token "${tokenId}" not found on the active scene`);
+        sp.token = token.id;
+        sp.scene = scene.id;
+      }
+      if (typeof speaker === "string" && !sp.alias) sp.alias = speaker;
+      data.speaker = sp;
+    } else {
+      data.speaker = ChatMessage.getSpeaker({ user: game.user });
+    }
+
+    // Whisper
+    if (whisperTo) {
+      const recipients = Array.isArray(whisperTo) ? whisperTo : [whisperTo];
+      data.whisper = [];
+      for (const rcpt of recipients) {
+        const user = game.users.get(rcpt) ?? game.users.find(u => u.name === rcpt);
+        if (!user) throw new Error(`User "${rcpt}" not found`);
+        data.whisper.push(user.id);
+      }
+    }
+
+    const msg = await ChatMessage.create(data);
+    return {
+      id: msg.id,
+      timestamp: msg.timestamp,
+      speaker: msg.speaker,
+      whisperedTo: (msg.whisper ?? []).map(uid => game.users.get(uid)?.name ?? uid),
+      contentPreview: String(msg.content).slice(0, 80)
+    };
+  },
+
+  // -------------------------------------------------------------------------
+  // Roll requests (Tier C). Pops a dialog on the routed user's screen so
+  // they can confirm and roll, then returns the result.
+  // -------------------------------------------------------------------------
+
+  /**
+   * Pop a Dialog on the routed user's screen asking them to make a roll.
+   * If `autoAccept: true`, skips the dialog and rolls immediately (useful
+   * for GM-side automation or test scenarios).
+   *
+   * Server-side this tool is registered with a longer timeout window than
+   * the standard 15s — see world-authoring.js registration.
+   */
+  request_roll: async (params = {}) => {
+    const { formula, prompt = "The GM is requesting a roll.", timeoutSeconds = 60, label, autoAccept } = params;
+    if (!formula || typeof formula !== "string") throw new Error("`formula` is required (e.g. '1d20+5')");
+
+    // Auto-accept short-circuit: roll immediately, post to chat, return.
+    if (autoAccept) {
+      const roll = await new Roll(formula).evaluate();
+      await roll.toMessage({ speaker: ChatMessage.getSpeaker(), flavor: label ?? prompt });
+      return {
+        mode: "auto_rolled",
+        formula,
+        total: roll.total,
+        result: roll.result,
+        dice: roll.dice.map(d => ({ faces: d.faces, results: d.results.map(x => x.result) }))
+      };
+    }
+
+    const escapeHtml = (s) => String(s).replace(/[&<>"']/g, c =>
+      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+    return new Promise((resolve) => {
+      let resolved = false;
+      let dialog;
+
+      const finalize = (result) => {
+        if (resolved) return;
+        resolved = true;
+        clearTimeout(timer);
+        try { dialog?.close(); } catch {}
+        resolve(result);
+      };
+
+      const timer = setTimeout(() => finalize({ mode: "timed_out", formula }), timeoutSeconds * 1000);
+
+      dialog = new Dialog({
+        title: label ? `Roll Request: ${label}` : "Roll Request",
+        content: `<div style="padding: 8px;">
+            <p>${escapeHtml(prompt)}</p>
+            <p><strong>Roll:</strong> <code>${escapeHtml(formula)}</code></p>
+          </div>`,
+        buttons: {
+          roll: {
+            label: "Roll",
+            callback: async () => {
+              try {
+                const roll = await new Roll(formula).evaluate();
+                await roll.toMessage({ speaker: ChatMessage.getSpeaker(), flavor: label ?? prompt });
+                finalize({
+                  mode: "rolled",
+                  formula,
+                  total: roll.total,
+                  result: roll.result,
+                  dice: roll.dice.map(d => ({ faces: d.faces, results: d.results.map(x => x.result) }))
+                });
+              } catch (err) {
+                finalize({ mode: "error", formula, error: err.message });
+              }
+            }
+          },
+          cancel: {
+            label: "Cancel",
+            callback: () => finalize({ mode: "cancelled", formula })
+          }
+        },
+        default: "roll",
+        close: () => finalize({ mode: "dismissed", formula })
+      });
+      dialog.render(true);
+    });
   }
 };
 
