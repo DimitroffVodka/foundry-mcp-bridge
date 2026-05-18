@@ -3400,9 +3400,11 @@ const handlers = {
 
   /**
    * Return the levels collection on a scene as a flat array. Multi-level
-   * scenes (Foundry v13+ native) expose `scene.levels` as a Map-like — each
-   * level has `{id, name, elevation: {bottom, top}}`. Single-level scenes
-   * return an empty levels array with a note.
+   * scenes (Foundry v14 native — not present in v12/v13) expose `scene.levels`
+   * as a Map-like, each level being `{id, name, elevation: {bottom, top}}`.
+   * Single-level scenes return an empty levels array with a note. Scenes on
+   * pre-v14 worlds will also return an empty array since `scene.levels` is
+   * undefined there.
    */
   get_scene_levels: (params = {}) => {
     const scene = params.sceneId ? game.scenes.get(params.sceneId) : (canvas.scene ?? game.scenes.active);

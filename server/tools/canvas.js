@@ -89,10 +89,10 @@ export function registerCanvasTools(mcp) {
 
   // --- Multi-level scene (v0.11.2) ---
   registerRoutedTool(mcp, "get_scene_levels",
-    "Return the levels collection on a multi-level scene (Foundry v13+) as " +
-    "a flat array of `{id, name, elevation: {bottom, top}}`. Empty array " +
-    "for single-level scenes. Includes the currently-active `levelId` when " +
-    "the scene is the viewed one.",
+    "Return the levels collection on a multi-level scene (Foundry v14 native, " +
+    "not present on v12/v13) as a flat array of `{id, name, elevation: {bottom, top}}`. " +
+    "Empty array for single-level scenes or pre-v14 worlds. Includes the " +
+    "currently-active `levelId` when the scene is the viewed one.",
     {
       sceneId: z.string().optional().describe("Target scene id. Default: active scene."),
     });
