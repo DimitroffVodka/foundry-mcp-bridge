@@ -2224,6 +2224,140 @@ const handlers = {
     const [created] = await journal.createEmbeddedDocuments("JournalEntryPage", [pageData]);
     if (!created) throw new Error("Journal page create returned no document");
     return { journalId, pageId: created.id, name: created.name };
+  },
+
+  // -------------------------------------------------------------------------
+  // World authoring — scene placement & ownership (Tier B). Same write gate.
+  // -------------------------------------------------------------------------
+
+  /**
+   * Place a new token for an actor onto a scene. Defaults to the active scene
+   * when `sceneId` is omitted. Accepts coordinates as either x/y in pixels OR
+   * gridX/gridY in cells (cell coords win if both provided).
+   *
+   * The new token starts from the actor's prototype token — name, image,
+   * scale, vision, disposition, etc. all carry over. Override individual
+   * fields via the optional params.
+   */
+  create_token: async (params = {}) => {
+    const { actorId, sceneId, x, y, gridX, gridY, hidden, name, rotation } = params;
+    if (!actorId) throw new Error("`actorId` is required");
+
+    const actor = game.actors.get(actorId);
+    if (!actor) throw new Error(`Actor "${actorId}" not found`);
+
+    const scene = sceneId
+      ? game.scenes.get(sceneId)
+      : (game.scenes.active ?? canvas.scene);
+    if (!scene) throw new Error(sceneId ? `Scene "${sceneId}" not found` : "No active scene to place token in");
+
+    let finalX = x, finalY = y;
+    if (gridX != null || gridY != null) {
+      // v11+: scene.grid is a BaseGrid instance with .size; pre-v11: scene.grid is a number.
+      const g = scene.grid;
+      const gridSize = (g && typeof g === "object") ? g.size : g;
+      if (!gridSize) throw new Error("Scene has no grid; pass x/y in pixels instead");
+      finalX = (gridX ?? 0) * gridSize;
+      finalY = (gridY ?? 0) * gridSize;
+    }
+    if (finalX == null || finalY == null) {
+      throw new Error("Provide coordinates: either x+y (pixels) or gridX+gridY (cells)");
+    }
+
+    const protoDoc = await actor.getTokenDocument({ x: finalX, y: finalY });
+    const tokenData = protoDoc.toObject();
+    if (typeof hidden === "boolean")  tokenData.hidden   = hidden;
+    if (typeof name === "string")     tokenData.name     = name;
+    if (typeof rotation === "number") tokenData.rotation = rotation;
+
+    const [created] = await scene.createEmbeddedDocuments("Token", [tokenData]);
+    if (!created) throw new Error("Token create returned no document");
+    return {
+      id: created.id, sceneId: scene.id, actorId: actor.id,
+      name: created.name, x: created.x, y: created.y, hidden: created.hidden
+    };
+  },
+
+  /**
+   * Set ownership levels on an actor. The `ownership` param is a map of
+   * { user → level }. Keys can be:
+   *   - "default"   → applies to every Foundry user not explicitly listed
+   *   - a userId    → exact match against game.users
+   *   - a userName  → resolved via case-sensitive exact match
+   * Levels can be strings ("NONE"/"LIMITED"/"OBSERVER"/"OWNER"/"INHERIT") or
+   * the corresponding integers (0/1/2/3/-1). The map is MERGED with existing
+   * ownership — to clear a user's permission, set them to "NONE" explicitly.
+   */
+  set_actor_ownership: async (params = {}) => {
+    const { actorId, ownership } = params;
+    if (!actorId) throw new Error("`actorId` is required");
+    if (!ownership || typeof ownership !== "object") {
+      throw new Error("`ownership` is required and must be an object map of user → level");
+    }
+    const actor = game.actors.get(actorId);
+    if (!actor) throw new Error(`Actor "${actorId}" not found`);
+
+    const LEVELS = CONST.DOCUMENT_OWNERSHIP_LEVELS;
+    const validNames = Object.keys(LEVELS);
+    const resolveLevel = (v) => {
+      if (typeof v === "number") return v;
+      if (typeof v !== "string") throw new Error(`Invalid ownership level value: ${v}`);
+      const upper = v.toUpperCase();
+      if (upper in LEVELS) return LEVELS[upper];
+      throw new Error(`Unknown ownership level "${v}". Use one of: ${validNames.join(", ")}`);
+    };
+
+    const newOwnership = { ...actor.ownership };
+    const changed = [];
+    for (const [key, val] of Object.entries(ownership)) {
+      const level = resolveLevel(val);
+      if (key === "default") {
+        newOwnership.default = level;
+        changed.push({ user: "default", level: val });
+        continue;
+      }
+      let user = game.users.get(key) ?? game.users.find(u => u.name === key);
+      if (!user) throw new Error(`User "${key}" not found (not a userId nor an exact userName)`);
+      newOwnership[user.id] = level;
+      changed.push({ userId: user.id, userName: user.name, level: val });
+    }
+
+    await actor.update({ ownership: newOwnership });
+    return { actorId, actorName: actor.name, changed };
+  },
+
+  /**
+   * Read the current ownership map of an actor, returning friendly level
+   * names (NONE/LIMITED/OBSERVER/OWNER) and resolved user names.
+   */
+  get_actor_ownership: async (params = {}) => {
+    const { actorId } = params;
+    if (!actorId) throw new Error("`actorId` is required");
+    const actor = game.actors.get(actorId);
+    if (!actor) throw new Error(`Actor "${actorId}" not found`);
+
+    const LEVELS = CONST.DOCUMENT_OWNERSHIP_LEVELS;
+    const levelName = (v) => Object.keys(LEVELS).find(k => LEVELS[k] === v) ?? String(v);
+
+    const users = [];
+    for (const [key, val] of Object.entries(actor.ownership)) {
+      if (key === "default") continue;
+      const u = game.users.get(key);
+      users.push({
+        userId: key,
+        userName: u?.name ?? "(unknown user)",
+        role: u?.role,
+        active: u?.active ?? false,
+        level: levelName(val)
+      });
+    }
+
+    return {
+      actorId,
+      actorName: actor.name,
+      default: levelName(actor.ownership.default ?? 0),
+      users
+    };
   }
 };
 

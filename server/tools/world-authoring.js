@@ -232,4 +232,50 @@ export function registerWorldAuthoringTools(mcp) {
         src:     z.string().optional().describe("URL/path for image/pdf/video pages."),
       }).describe("Page to add."),
     });
+
+  // --- Scene: place a token ---
+  registerRoutedTool(mcp, "create_token",
+    "Place a new token for an actor onto a scene. Defaults to the active "
+    + "scene when `sceneId` is omitted. Pass coordinates as EITHER `x`/`y` "
+    + "in pixels OR `gridX`/`gridY` in cells (cell coords win if both are "
+    + "provided). The token inherits the actor's prototype token settings; "
+    + "use the optional `hidden`/`name`/`rotation` to override.",
+    {
+      actorId:  z.string().describe("Actor whose token to place."),
+      sceneId:  z.string().optional().describe("Target scene id. Default: active scene."),
+      x:        z.number().optional().describe("X position in pixels. Use this OR gridX."),
+      y:        z.number().optional().describe("Y position in pixels. Use this OR gridY."),
+      gridX:    z.number().optional().describe("Grid cell column (0-indexed). Multiplied by scene grid size."),
+      gridY:    z.number().optional().describe("Grid cell row (0-indexed). Multiplied by scene grid size."),
+      hidden:   z.boolean().optional().describe("Spawn the token hidden to non-GMs."),
+      name:     z.string().optional().describe("Override the token name (defaults to the actor name)."),
+      rotation: z.number().optional().describe("Token rotation in degrees."),
+    });
+
+  // --- Ownership: set ---
+  registerRoutedTool(mcp, "set_actor_ownership",
+    "Set ownership levels on an actor. The `ownership` param is a map of "
+    + "{ user → level }. Keys can be `default`, a userId, or an exact "
+    + "case-sensitive userName. Levels are strings (NONE/LIMITED/OBSERVER/"
+    + "OWNER/INHERIT) or the corresponding integers (0/1/2/3/-1). The map "
+    + "is MERGED with existing ownership — to clear a user's permission, "
+    + "pass them as `NONE` explicitly.",
+    {
+      actorId:   z.string().describe("Actor document id."),
+      ownership: z.record(z.string(), z.union([
+        z.enum(["NONE", "LIMITED", "OBSERVER", "OWNER", "INHERIT"]),
+        z.number().int().min(-1).max(3)
+      ])).describe(
+        "Map of user → level. Use `default` for non-listed users. "
+        + "Example: { default: \"NONE\", \"Bob\": \"OWNER\" }."
+      ),
+    });
+
+  // --- Ownership: read ---
+  registerRoutedTool(mcp, "get_actor_ownership",
+    "Read the current ownership map of an actor — returns level names "
+    + "(NONE/LIMITED/OBSERVER/OWNER) and resolved Foundry user names.",
+    {
+      actorId: z.string().describe("Actor document id."),
+    });
 }

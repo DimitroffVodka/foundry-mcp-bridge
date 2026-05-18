@@ -566,6 +566,47 @@ Add a new page to an existing journal entry. Page shape matches `create_journal_
   - `page` — `{ name, type?, text?: { content, format? }, src? }`. Same fields as `create_journal_entry` pages.
 - **Returns**: `{ journalId, pageId, name }`.
 
+### `create_token`
+Place a new token for an actor onto a scene. Defaults to the active scene when `sceneId` is omitted. Pass coordinates as **either** pixels OR cells — cell coords win if both are provided.
+
+- **Params**:
+  - `actorId` — actor whose token to place.
+  - `sceneId` (optional) — target scene. Default: active scene.
+  - `x`, `y` (optional) — pixel coordinates.
+  - `gridX`, `gridY` (optional) — grid cell coordinates (0-indexed). Multiplied by the scene's grid size to get pixels.
+  - `hidden` (optional) — spawn hidden to non-GMs.
+  - `name` (optional) — override the token name (defaults to actor name).
+  - `rotation` (optional) — rotation in degrees.
+- **Returns**: `{ id, sceneId, actorId, name, x, y, hidden }`.
+
+The token inherits the actor's **prototype token** — image, scale, vision, disposition, etc. all carry over.
+
+### `set_actor_ownership`
+Set ownership levels on an actor. The `ownership` param is a map of `{ user → level }`.
+
+- **Keys** can be:
+  - `"default"` — applies to every Foundry user not explicitly listed.
+  - A userId (exact match against `game.users`).
+  - A userName (case-sensitive exact match).
+- **Levels** can be string names (`"NONE"`, `"LIMITED"`, `"OBSERVER"`, `"OWNER"`, `"INHERIT"`) or the corresponding ints (0–3, or -1 for INHERIT).
+- **Merging:** the map is merged with existing ownership. To clear a user's permission, pass them as `"NONE"` explicitly — omitting them leaves their existing level intact.
+- **Params**: `actorId`, `ownership` (the map above).
+- **Returns**: `{ actorId, actorName, changed: [...] }` — `changed` lists each user whose level was applied, with the resolved userId.
+
+**Example** — give Bob full control, lock everyone else out:
+```json
+{
+  "actorId": "abc123",
+  "ownership": { "default": "NONE", "Bob": "OWNER" }
+}
+```
+
+### `get_actor_ownership`
+Read the current ownership map of an actor with friendly level names.
+
+- **Params**: `actorId`.
+- **Returns**: `{ actorId, actorName, default: "<level>", users: [{ userId, userName, role, active, level }] }`.
+
 ---
 
 ## Patterns & workflows
