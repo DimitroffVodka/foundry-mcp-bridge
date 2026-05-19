@@ -5,7 +5,7 @@
  *   - `use_item` — trigger an item on an actor and capture the resulting cards
  */
 import { z }                  from "zod";
-import { registerRoutedTool } from "./_helpers.js";
+import { registerRoutedTool, AUDIT_DESC } from "./_helpers.js";
 
 export function registerDiceTools(mcp) {
   registerRoutedTool(mcp, "roll",
@@ -26,5 +26,6 @@ export function registerDiceTools(mcp) {
       item:   z.string().describe("Item id or name on that actor."),
       rig:    z.array(z.number()).optional().describe("Forced face values for dice that roll during the use."),
       method: z.string().optional().describe("Override the item method to call. Default: 'use' or 'roll'."),
+      audit:  z.boolean().optional().describe(AUDIT_DESC),
     });
 }

@@ -21,6 +21,17 @@ If the named user isn't connected, the tool errors with `"No bridge connected fo
 
 **Why it matters:** testing module behavior from a player's perspective without losing the GM session. A GM-side `evaluate` won't surface permission-gated bugs the way a player-side one will.
 
+### `audit` (optional, mutating tools only)
+
+Every tool that modifies the Foundry world (creates, updates, or deletes documents) accepts an optional `audit: true` parameter. When set, the tool returns an `audit` block containing a flight recorder of the mutation.
+
+- **`audit.before`** — snapshot of the affected document(s) *before* the change.
+- **`audit.after`** — snapshot *after* the change.
+- **`audit.diff`** — structured delta of what actually changed. Noisy metadata (timestamps, stats, IDs) is automatically filtered.
+- **`audit.undo`** — dry instructions for how to revert the change (e.g. rollback data or a delete command).
+
+**Efficiency Note:** Full snapshots are limited to 10 documents per call to keep context window usage low. If more are affected, the audit will note the truncation. Use this to self-verify your work in an **Act -> Validate** loop.
+
 The only non-routed (server-local) tool is `list_connected_bridges` itself.
 
 ---

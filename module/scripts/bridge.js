@@ -8,6 +8,13 @@
  * This means the MCP server must be running before Foundry connects.
  */
 
+import {
+  runAuditedMutation,
+  deepDiff,
+  safeSerializeHookArg,
+  extractDocRef
+} from "../lib/audit.js";
+
 const MODULE_ID = "foundry-mcp-live";
 const WS_URL = "ws://localhost:3001";
 const RECONNECT_DELAY = 5000;
@@ -213,63 +220,6 @@ async function runWithCapture({ rig, waitMs = 250 }, fn) {
   return { result, messages };
 }
 
-// ---------------------------------------------------------------------------
-// Safe serializer for hook arguments (documents, circular refs, deep trees)
-// ---------------------------------------------------------------------------
-function safeSerializeHookArg(val, depth = 0, maxDepth = 3) {
-  if (val === null || val === undefined)    return val;
-  const t = typeof val;
-  if (t === "string" || t === "number" || t === "boolean") return val;
-  if (t === "function") return `[Function ${val.name || "anon"}]`;
-  if (depth >= maxDepth) return "[max depth]";
-
-  // Errors — extract non-enumerable own props explicitly. Plain
-  // JSON.stringify on an Error returns {} because name/message/stack are
-  // non-enumerable; Object.keys() doesn't see them. Without this branch,
-  // every "Handler error for X" log line bottoms out at "{}" and the
-  // useful debugging info is lost.
-  if (val instanceof Error) {
-    const out = {
-      _type:   "Error",
-      name:    val.name,
-      message: val.message,
-      stack:   val.stack
-    };
-    if (val.cause !== undefined) {
-      try { out.cause = safeSerializeHookArg(val.cause, depth + 1, maxDepth); }
-      catch { out.cause = "[unserializable]"; }
-    }
-    return out;
-  }
-
-  // Foundry documents — summarise
-  if (val?.documentName) {
-    return {
-      _document: val.documentName,
-      id:   val.id   ?? null,
-      name: val.name ?? null,
-      uuid: val.uuid ?? null
-    };
-  }
-  if (val instanceof Map) val = Object.fromEntries(val);
-  if (val instanceof Set) val = Array.from(val);
-
-  if (Array.isArray(val)) {
-    return val.slice(0, 10).map(v => safeSerializeHookArg(v, depth + 1, maxDepth));
-  }
-
-  if (t === "object") {
-    const out = {};
-    const keys = Object.keys(val).slice(0, 25);
-    for (const k of keys) {
-      try { out[k] = safeSerializeHookArg(val[k], depth + 1, maxDepth); }
-      catch { out[k] = "[unserializable]"; }
-    }
-    return out;
-  }
-  return String(val);
-}
-
 // Deep-diff two structures. Arrays whose elements all have `_id` are matched
 // by id (so reordering doesn't show up as a change); otherwise positional.
 /**
@@ -356,42 +306,6 @@ function projectPath(obj, path) {
     if (node instanceof Map) return [...node.entries()];
     return node;
   }
-}
-
-function deepDiff(a, b, path = "") {
-  const changes = [];
-  if (a === b) return changes;
-
-  if (a === undefined) { changes.push({ path, op: "added",   after:  b }); return changes; }
-  if (b === undefined) { changes.push({ path, op: "removed", before: a }); return changes; }
-
-  const ta = typeof a, tb = typeof b;
-  const isObjA = ta === "object" && a !== null;
-  const isObjB = tb === "object" && b !== null;
-
-  if (!isObjA || !isObjB || Array.isArray(a) !== Array.isArray(b)) {
-    if (a !== b) changes.push({ path, op: "changed", before: a, after: b });
-    return changes;
-  }
-
-  if (Array.isArray(a)) {
-    const aHasIds = a.length > 0 && a.every(e => e && typeof e === "object" && "_id" in e);
-    const bHasIds = b.length > 0 && b.every(e => e && typeof e === "object" && "_id" in e);
-    if (aHasIds && bHasIds) {
-      const aMap = new Map(a.map(e => [e._id, e]));
-      const bMap = new Map(b.map(e => [e._id, e]));
-      const ids = new Set([...aMap.keys(), ...bMap.keys()]);
-      for (const id of ids) changes.push(...deepDiff(aMap.get(id), bMap.get(id), `${path}[#${id}]`));
-      return changes;
-    }
-    const max = Math.max(a.length, b.length);
-    for (let i = 0; i < max; i++) changes.push(...deepDiff(a[i], b[i], `${path}[${i}]`));
-    return changes;
-  }
-
-  const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
-  for (const k of keys) changes.push(...deepDiff(a[k], b[k], path ? `${path}.${k}` : k));
-  return changes;
 }
 
 // Resolve a token reference (id, token name, or linked actor name) on a scene.
@@ -988,6 +902,127 @@ function _normalizeDamageResult(systemId, rawRoll, isCritical) {
     types
   };
 }
+
+// ---------------------------------------------------------------------------
+// Mutation Audit Capture Plans
+// ---------------------------------------------------------------------------
+const capturePlans = {
+  actor: {
+    before: async (p) => {
+      const actor = game.actors.get(p.actorId) ?? game.actors.getName(p.actorId) ?? game.actors.get(p.actor) ?? game.actors.getName(p.actor);
+      return actor ? actor.toObject() : null;
+    },
+    // For create_* tools, params don't carry an id (the actor doesn't exist
+    // yet). Use the result.id returned by the handler as the primary
+    // lookup — only that path can find the newly-created actor.
+    after: async (p, res) => {
+      const id = res?.id ?? res?._id ?? p.actorId ?? p.actor;
+      if (!id) return null;
+      const actor = game.actors.get(id) ?? game.actors.getName(id);
+      return actor ? actor.toObject() : null;
+    }
+  },
+  token: {
+    before: async (p) => {
+      const scene = p.sceneId ? game.scenes.get(p.sceneId) : game.scenes.active;
+      const token = _findToken(scene, p.token);
+      return token ? token.toObject() : null;
+    },
+    after: async (p, res) => {
+      const scene = p.sceneId ? game.scenes.get(p.sceneId) : (res?.sceneId ? game.scenes.get(res.sceneId) : game.scenes.active);
+      // For create_token, the new token id comes back in res.id; for
+      // mutations to existing tokens, p.token resolves the document.
+      const ref = res?.id ?? p.token;
+      const token = _findToken(scene, ref);
+      return token ? token.toObject() : null;
+    }
+  },
+  scene: {
+    before: async (p) => {
+      const scene = (p.sceneId || p.id) ? (game.scenes.get(p.sceneId || p.id) || game.scenes.getName(p.sceneName)) : game.scenes.active;
+      return scene ? scene.toObject() : null;
+    },
+    after: async (p, res) => {
+      // For create_scene, res carries the new scene's id. For other scene
+      // mutations, fall back to the input params.
+      const id = res?.id ?? p.sceneId ?? p.id;
+      const scene = id ? (game.scenes.get(id) || game.scenes.getName(p.sceneName)) : game.scenes.active;
+      return scene ? scene.toObject() : null;
+    }
+  },
+  combat: {
+    before: async () => {
+      const combat = game.combat;
+      return combat ? { id: combat.id, round: combat.round, turn: combat.turn, started: combat.started } : null;
+    },
+    after: async () => {
+      const combat = game.combat;
+      return combat ? { id: combat.id, round: combat.round, turn: combat.turn, started: combat.started } : null;
+    }
+  },
+  targets: {
+    before: async () => [...game.user.targets].map(t => t.id),
+    after: async () => [...game.user.targets].map(t => t.id)
+  },
+  tokens: {
+    before: async (p) => {
+      const scene = game.scenes.active;
+      const refs = Array.isArray(p.tokens) ? p.tokens : (p.token ? [p.token] : []);
+      return refs.map(r => _findToken(scene, r)?.toObject()).filter(Boolean);
+    },
+    after: async (p) => {
+      const scene = game.scenes.active;
+      const refs = Array.isArray(p.tokens) ? p.tokens : (p.token ? [p.token] : []);
+      return refs.map(r => _findToken(scene, r)?.toObject()).filter(Boolean);
+    }
+  },
+  messages: {
+    before: async () => [],
+    after: async (p, res) => res.messages ?? []
+  },
+  folder: {
+    before: async (p) => {
+      if (!p.folderId) return null;
+      return game.folders.get(p.folderId)?.toObject() ?? null;
+    },
+    after: async (p, res) => {
+      const id = res.id ?? p.folderId;
+      return game.folders.get(id)?.toObject() ?? null;
+    }
+  },
+  journal: {
+    before: async (p) => {
+      if (!p.journalId) return null;
+      return game.journal.get(p.journalId)?.toObject() ?? null;
+    },
+    after: async (p, res) => {
+      const id = res.id ?? p.journalId;
+      return game.journal.get(id)?.toObject() ?? null;
+    }
+  },
+  roll_action: {
+    before: async (p) => {
+      const actor = game.actors.get(p.actorId) || game.actors.getName(p.actorId);
+      const out = { actor: actor ? actor.toObject() : null };
+      if (p.targetIds) {
+        out.targets = p.targetIds.map(tid => (game.actors.get(tid) || game.actors.getName(tid) || canvas.tokens.get(tid)?.actor)?.toObject()).filter(Boolean);
+      }
+      return out;
+    },
+    after: async (p) => {
+      const actor = game.actors.get(p.actorId) || game.actors.getName(p.actorId);
+      const out = { actor: actor ? actor.toObject() : null };
+      if (p.targetIds) {
+        out.targets = p.targetIds.map(tid => (game.actors.get(tid) || game.actors.getName(tid) || canvas.tokens.get(tid)?.actor)?.toObject()).filter(Boolean);
+      }
+      return out;
+    }
+  },
+  none: {
+    before: async () => null,
+    after: async () => null
+  }
+};
 
 // ---------------------------------------------------------------------------
 // Request handlers — each returns serialisable data
@@ -1795,23 +1830,25 @@ const handlers = {
    * tool which drives the real DOM click path.
    */
   use_item: async (params = {}) => {
-    const actor = game.actors.get(params.actor) ?? game.actors.getName(params.actor);
-    if (!actor) return { error: `Actor not found: ${params.actor}` };
+    return runAuditedMutation("use_item", params, capturePlans.actor, async () => {
+      const actor = game.actors.get(params.actor) ?? game.actors.getName(params.actor);
+      if (!actor) return { error: `Actor not found: ${params.actor}` };
 
-    const item = actor.items.get(params.item) ?? actor.items.getName(params.item);
-    if (!item) return { error: `Item not found on ${actor.name}: ${params.item}` };
+      const item = actor.items.get(params.item) ?? actor.items.getName(params.item);
+      if (!item) return { error: `Item not found on ${actor.name}: ${params.item}` };
 
-    const method = params.method ?? (typeof item.use === "function" ? "use" : "roll");
-    if (typeof item[method] !== "function") {
-      return { error: `Item ${item.name} has no ${method}() method.` };
-    }
+      const method = params.method ?? (typeof item.use === "function" ? "use" : "roll");
+      if (typeof item[method] !== "function") {
+        return { error: `Item ${item.name} has no ${method}() method.` };
+      }
 
-    try {
-      const { messages } = await runWithCapture({ rig: params.rig }, () => item[method]());
-      return { actor: actor.name, item: item.name, method, messagesCreated: messages.length, messages };
-    } catch (err) {
-      return { error: err.message, stack: err.stack };
-    }
+      try {
+        const { messages } = await runWithCapture({ rig: params.rig }, () => item[method]());
+        return { actor: actor.name, item: item.name, method, messagesCreated: messages.length, messages };
+      } catch (err) {
+        return { error: err.message, stack: err.stack };
+      }
+    });
   },
 
   // -------------------------------------------------------------------------
@@ -1866,16 +1903,18 @@ const handlers = {
 
   /** Move a token to (x, y) on the active scene with optional animation. */
   move_token: async (params = {}) => {
-    const scene = game.scenes.active;
-    if (!scene) return { error: "No active scene" };
-    const t = _findToken(scene, params.token);
-    if (!t) return { error: `Token not found: ${params.token}` };
-    if (typeof params.x !== "number" || typeof params.y !== "number") {
-      return { error: "x and y are required numbers" };
-    }
-    const animation = params.animate === false ? { duration: 0 } : undefined;
-    await t.update({ x: params.x, y: params.y }, animation ? { animation } : {});
-    return { id: t.id, name: t.name, x: t.x, y: t.y };
+    return runAuditedMutation("move_token", params, capturePlans.token, async () => {
+      const scene = game.scenes.active;
+      if (!scene) return { error: "No active scene" };
+      const t = _findToken(scene, params.token);
+      if (!t) return { error: `Token not found: ${params.token}` };
+      if (typeof params.x !== "number" || typeof params.y !== "number") {
+        return { error: "x and y are required numbers" };
+      }
+      const animation = params.animate === false ? { duration: 0 } : undefined;
+      await t.update({ x: params.x, y: params.y }, animation ? { animation } : {});
+      return { id: t.id, name: t.name, x: t.x, y: t.y };
+    });
   },
 
   /**
@@ -1886,182 +1925,190 @@ const handlers = {
    * waypoint carries animation — intermediate hops teleport.
    */
   move_token_pathed: async (params = {}) => {
-    const scene = game.scenes.active;
-    if (!scene) return { error: "No active scene" };
-    const t = _findToken(scene, params.token);
-    if (!t) return { error: `Token not found: ${params.token}` };
-    if (typeof params.x !== "number" || typeof params.y !== "number") {
-      return { error: "x and y are required numbers" };
-    }
-
-    const animate  = params.animate !== false;
-    const backend  = CONFIG?.Canvas?.polygonBackends?.move;
-    const gridSize = canvas?.scene?.grid?.size;
-
-    const finalExtras = {};
-    if (params.elevation !== undefined) finalExtras.elevation = params.elevation;
-    if (params.rotation  !== undefined) finalExtras.rotation  = params.rotation;
-
-    // Fallback — no collision backend / grid: plain teleport
-    if (!backend || !gridSize) {
-      const opts = animate ? {} : { animation: { duration: 0 } };
-      await t.update({ x: params.x, y: params.y, ...finalExtras }, opts);
-      return { id: t.id, name: t.name, x: t.x, y: t.y, pathCost: null, doorsOpened: [] };
-    }
-
-    const tokenW = t.width;
-    const tokenH = t.height;
-
-    let collision = backend;
-    let openable = [];
-    const useDoorAware = !!params.canOpenDoors && !!scene.walls?.contents?.length;
-    if (useDoorAware) {
-      const wallInfos = scene.walls.contents.map(w => ({
-        _id: w._id ?? w.id, c: w.c, door: w.door, ds: w.ds ?? 0, move: w.move
-      }));
-      collision = _createDoorAwareCollision(backend, wallInfos);
-      openable  = wallInfos.filter(w => w.door === 1 && w.ds === 0 && w.move !== 0);
-    }
-
-    const directBlocked = _cellsBlocked(
-      t.x, t.y, params.x, params.y, tokenW, tokenH, gridSize, collision
-    );
-
-    let path = null;
-    let pathCost = 0;
-    if (directBlocked) {
-      const result = _findGridPath({
-        startX: t.x, startY: t.y, endX: params.x, endY: params.y,
-        gridSize, collision, tokenWidth: tokenW, tokenHeight: tokenH
-      });
-      if (!result || result.path.length === 0) {
-        return { error: "Path blocked — no valid route to destination" };
+    return runAuditedMutation("move_token_pathed", params, capturePlans.token, async () => {
+      const scene = game.scenes.active;
+      if (!scene) return { error: "No active scene" };
+      const t = _findToken(scene, params.token);
+      if (!t) return { error: `Token not found: ${params.token}` };
+      if (typeof params.x !== "number" || typeof params.y !== "number") {
+        return { error: "x and y are required numbers" };
       }
-      path = result.path;
-      pathCost = result.cost;
-    } else {
-      path = [{ x: params.x, y: params.y }];
-    }
 
-    const doorsOnPath = useDoorAware
-      ? _findDoorsAlongPath(path, t.x, t.y, gridSize, openable)
-      : [];
-    const doorsByStep = new Map();
-    for (const d of doorsOnPath) {
-      const idx = d.betweenIndex - 1;
-      const arr = doorsByStep.get(idx) ?? [];
-      arr.push(d);
-      doorsByStep.set(idx, arr);
-    }
+      const animate  = params.animate !== false;
+      const backend  = CONFIG?.Canvas?.polygonBackends?.move;
+      const gridSize = canvas?.scene?.grid?.size;
 
-    const doorsOpened = [];
-    let current = t;
-    for (let i = 0; i < path.length; i++) {
-      const wp = path[i];
-      const doorsHere = doorsByStep.get(i);
+      const finalExtras = {};
+      if (params.elevation !== undefined) finalExtras.elevation = params.elevation;
+      if (params.rotation  !== undefined) finalExtras.rotation  = params.rotation;
 
-      if (doorsHere && scene.walls) {
-        for (const door of doorsHere) {
-          const wall = scene.walls.get(door.wallId);
-          if (wall && wall.door !== 0 && (wall.ds === 0 || wall.ds === undefined)) {
-            await wall.update({ ds: 1 });
-            doorsOpened.push(door.wallId);
-            await _delay(_DOOR_OPEN_DELAY);
+      // Fallback — no collision backend / grid: plain teleport
+      if (!backend || !gridSize) {
+        const opts = animate ? {} : { animation: { duration: 0 } };
+        await t.update({ x: params.x, y: params.y, ...finalExtras }, opts);
+        return { id: t.id, name: t.name, x: t.x, y: t.y, pathCost: null, doorsOpened: [] };
+      }
+
+      const tokenW = t.width;
+      const tokenH = t.height;
+
+      let collision = backend;
+      let openable = [];
+      const useDoorAware = !!params.canOpenDoors && !!scene.walls?.contents?.length;
+      if (useDoorAware) {
+        const wallInfos = scene.walls.contents.map(w => ({
+          _id: w._id ?? w.id, c: w.c, door: w.door, ds: w.ds ?? 0, move: w.move
+        }));
+        collision = _createDoorAwareCollision(backend, wallInfos);
+        openable  = wallInfos.filter(w => w.door === 1 && w.ds === 0 && w.move !== 0);
+      }
+
+      const directBlocked = _cellsBlocked(
+        t.x, t.y, params.x, params.y, tokenW, tokenH, gridSize, collision
+      );
+
+      let path = null;
+      let pathCost = 0;
+      if (directBlocked) {
+        const result = _findGridPath({
+          startX: t.x, startY: t.y, endX: params.x, endY: params.y,
+          gridSize, collision, tokenWidth: tokenW, tokenHeight: tokenH
+        });
+        if (!result || result.path.length === 0) {
+          return { error: "Path blocked — no valid route to destination" };
+        }
+        path = result.path;
+        pathCost = result.cost;
+      } else {
+        path = [{ x: params.x, y: params.y }];
+      }
+
+      const doorsOnPath = useDoorAware
+        ? _findDoorsAlongPath(path, t.x, t.y, gridSize, openable)
+        : [];
+      const doorsByStep = new Map();
+      for (const d of doorsOnPath) {
+        const idx = d.betweenIndex - 1;
+        const arr = doorsByStep.get(idx) ?? [];
+        arr.push(d);
+        doorsByStep.set(idx, arr);
+      }
+
+      const doorsOpened = [];
+      let current = t;
+      for (let i = 0; i < path.length; i++) {
+        const wp = path[i];
+        const doorsHere = doorsByStep.get(i);
+
+        if (doorsHere && scene.walls) {
+          for (const door of doorsHere) {
+            const wall = scene.walls.get(door.wallId);
+            if (wall && wall.door !== 0 && (wall.ds === 0 || wall.ds === undefined)) {
+              await wall.update({ ds: 1 });
+              doorsOpened.push(door.wallId);
+              await _delay(_DOOR_OPEN_DELAY);
+            }
           }
         }
+
+        const isLast         = i === path.length - 1;
+        const upd            = { x: wp.x, y: wp.y, ...(isLast ? finalExtras : {}) };
+        const shouldAnimate  = isLast && animate;
+        const opts           = {};
+        if (!shouldAnimate) opts.animation = { duration: 0 };
+        if (doorsHere)      opts.teleport  = true;
+
+        await current.update(upd, opts);
+        const refreshed = scene.tokens.get(current.id);
+        if (!refreshed) return { error: "Token lost during movement" };
+        current = refreshed;
       }
 
-      const isLast         = i === path.length - 1;
-      const upd            = { x: wp.x, y: wp.y, ...(isLast ? finalExtras : {}) };
-      const shouldAnimate  = isLast && animate;
-      const opts           = {};
-      if (!shouldAnimate) opts.animation = { duration: 0 };
-      if (doorsHere)      opts.teleport  = true;
-
-      await current.update(upd, opts);
-      const refreshed = scene.tokens.get(current.id);
-      if (!refreshed) return { error: "Token lost during movement" };
-      current = refreshed;
-    }
-
-    return {
-      id: current.id,
-      name: current.name,
-      x: current.x,
-      y: current.y,
-      pathCost,
-      doorsOpened
-    };
+      return {
+        id: current.id,
+        name: current.name,
+        x: current.x,
+        y: current.y,
+        pathCost,
+        doorsOpened
+      };
+    });
   },
 
   /** Update arbitrary token properties: position, size, rotation, hidden, disposition, etc. */
   update_token: async (params = {}) => {
-    const scene = game.scenes.active;
-    if (!scene) return { error: "No active scene" };
-    const t = _findToken(scene, params.token);
-    if (!t) return { error: `Token not found: ${params.token}` };
-    if (!params.updates || typeof params.updates !== "object") {
-      return { error: "updates object is required" };
-    }
-    // Whitelist top-level keys to avoid accidental destructive writes.
-    // `flags` is included so module-specific data (e.g. Levels module's
-    // flags.levels.rangeTop/rangeBottom for elevation-aware scenes) can be
-    // set without falling back to evaluate. Foundry's document.update does a
-    // deep merge on flags, so existing module flags are preserved.
-    const allowed = ["x", "y", "width", "height", "rotation", "hidden", "disposition", "name", "elevation", "lockRotation", "sort", "alpha", "tint", "flags"];
-    const updates = {};
-    for (const k of allowed) if (k in params.updates) updates[k] = params.updates[k];
-    if (Object.keys(updates).length === 0) {
-      return { error: `No allowed fields in updates. Allowed: ${allowed.join(", ")}` };
-    }
-    await t.update(updates);
-    return { id: t.id, name: t.name, applied: updates };
+    return runAuditedMutation("update_token", params, capturePlans.token, async () => {
+      const scene = game.scenes.active;
+      if (!scene) return { error: "No active scene" };
+      const t = _findToken(scene, params.token);
+      if (!t) return { error: `Token not found: ${params.token}` };
+      if (!params.updates || typeof params.updates !== "object") {
+        return { error: "updates object is required" };
+      }
+      // Whitelist top-level keys to avoid accidental destructive writes.
+      // `flags` is included so module-specific data (e.g. Levels module's
+      // flags.levels.rangeTop/rangeBottom for elevation-aware scenes) can be
+      // set without falling back to evaluate. Foundry's document.update does a
+      // deep merge on flags, so existing module flags are preserved.
+      const allowed = ["x", "y", "width", "height", "rotation", "hidden", "disposition", "name", "elevation", "lockRotation", "sort", "alpha", "tint", "flags"];
+      const updates = {};
+      for (const k of allowed) if (k in params.updates) updates[k] = params.updates[k];
+      if (Object.keys(updates).length === 0) {
+        return { error: `No allowed fields in updates. Allowed: ${allowed.join(", ")}` };
+      }
+      await t.update(updates);
+      return { id: t.id, name: t.name, applied: updates };
+    });
   },
 
   /** Delete one or more tokens from the active scene. */
   delete_tokens: async (params = {}) => {
-    const scene = game.scenes.active;
-    if (!scene) return { error: "No active scene" };
-    const refs = Array.isArray(params.tokens) ? params.tokens : [params.tokens].filter(Boolean);
-    if (refs.length === 0) return { error: "tokens array is required" };
+    return runAuditedMutation("delete_tokens", params, capturePlans.tokens, async () => {
+      const scene = game.scenes.active;
+      if (!scene) return { error: "No active scene" };
+      const refs = Array.isArray(params.tokens) ? params.tokens : [params.tokens].filter(Boolean);
+      if (refs.length === 0) return { error: "tokens array is required" };
 
-    const ids = [];
-    const missing = [];
-    for (const r of refs) {
-      const t = _findToken(scene, r);
-      if (t) ids.push(t.id); else missing.push(r);
-    }
-    if (ids.length === 0) return { error: "No matching tokens found", missing };
+      const ids = [];
+      const missing = [];
+      for (const r of refs) {
+        const t = _findToken(scene, r);
+        if (t) ids.push(t.id); else missing.push(r);
+      }
+      if (ids.length === 0) return { error: "No matching tokens found", missing };
 
-    await scene.deleteEmbeddedDocuments("Token", ids);
-    return { deleted: ids, missing };
+      await scene.deleteEmbeddedDocuments("Token", ids);
+      return { deleted: ids, missing };
+    });
   },
 
   /** Toggle a status effect on a token's actor. */
   toggle_token_condition: async (params = {}) => {
-    const scene = game.scenes.active;
-    if (!scene) return { error: "No active scene" };
-    const t = _findToken(scene, params.token);
-    if (!t) return { error: `Token not found: ${params.token}` };
-    if (!params.condition) return { error: "condition is required" };
-    if (!t.actor) return { error: "Token has no linked actor" };
+    return runAuditedMutation("toggle_token_condition", params, capturePlans.token, async () => {
+      const scene = game.scenes.active;
+      if (!scene) return { error: "No active scene" };
+      const t = _findToken(scene, params.token);
+      if (!t) return { error: `Token not found: ${params.token}` };
+      if (!params.condition) return { error: "condition is required" };
+      if (!t.actor) return { error: "Token has no linked actor" };
 
-    const effect = (CONFIG.statusEffects || []).find(e =>
-      e.id === params.condition ||
-      e.name === params.condition ||
-      (e.label && e.label === params.condition)
-    );
-    if (!effect) return { error: `Unknown condition: ${params.condition}` };
+      const effect = (CONFIG.statusEffects || []).find(e =>
+        e.id === params.condition ||
+        e.name === params.condition ||
+        (e.label && e.label === params.condition)
+      );
+      if (!effect) return { error: `Unknown condition: ${params.condition}` };
 
-    // v13: Actor.toggleStatusEffect handles add/remove/toggle
-    const newState = await t.actor.toggleStatusEffect(effect.id, { active: params.active });
-    return {
-      id: t.id,
-      name: t.name,
-      condition: effect.id,
-      active: newState !== false,
-      statuses: Array.from(t.actor.statuses ?? [])
-    };
+      // v13: Actor.toggleStatusEffect handles add/remove/toggle
+      const newState = await t.actor.toggleStatusEffect(effect.id, { active: params.active });
+      return {
+        id: t.id,
+        name: t.name,
+        condition: effect.id,
+        active: newState !== false,
+        statuses: Array.from(t.actor.statuses ?? [])
+      };
+    });
   },
 
   /**
@@ -2071,28 +2118,30 @@ const handlers = {
    * against real defenses. Pass an empty array to clear targets.
    */
   target: async (params = {}) => {
-    const list = Array.isArray(params.tokens) ? params.tokens
-                : params.tokens != null ? [params.tokens] : [];
+    return runAuditedMutation("target", params, capturePlans.targets, async () => {
+      const list = Array.isArray(params.tokens) ? params.tokens
+                  : params.tokens != null ? [params.tokens] : [];
 
-    if (!canvas?.ready) return { error: "Canvas not ready" };
-    const placeables = canvas.tokens?.placeables ?? [];
+      if (!canvas?.ready) return { error: "Canvas not ready" };
+      const placeables = canvas.tokens?.placeables ?? [];
 
-    const found = [];
-    const missing = [];
-    for (const ref of list) {
-      const t = placeables.find(p => p.id === ref || p.document?.id === ref || p.name === ref || p.actor?.name === ref);
-      if (t) found.push(t); else missing.push(ref);
-    }
+      const found = [];
+      const missing = [];
+      for (const ref of list) {
+        const t = placeables.find(p => p.id === ref || p.document?.id === ref || p.name === ref || p.actor?.name === ref);
+        if (t) found.push(t); else missing.push(ref);
+      }
 
-    // Clear existing targets first, then set new ones (atomic from user POV)
-    for (const t of [...game.user.targets]) t.setTarget(false, { user: game.user, releaseOthers: false, groupSelection: true });
-    for (const t of found) t.setTarget(true,  { user: game.user, releaseOthers: false, groupSelection: true });
+      // Clear existing targets first, then set new ones (atomic from user POV)
+      for (const t of [...game.user.targets]) t.setTarget(false, { user: game.user, releaseOthers: false, groupSelection: true });
+      for (const t of found) t.setTarget(true,  { user: game.user, releaseOthers: false, groupSelection: true });
 
-    return {
-      targeted: found.map(t => ({ id: t.id, name: t.name, actor: t.actor?.name ?? null, hp: t.actor?.system?.hp ?? null })),
-      missing,
-      total: found.length
-    };
+      return {
+        targeted: found.map(t => ({ id: t.id, name: t.name, actor: t.actor?.name ?? null, hp: t.actor?.system?.hp ?? null })),
+        missing,
+        total: found.length
+      };
+    });
   },
 
   /**
@@ -2319,30 +2368,32 @@ const handlers = {
    * instead of creating a duplicate.
    */
   create_folder: async (params = {}) => {
-    const { type, name, parentFolder, color } = params;
-    if (!type || !name) throw new Error("`type` and `name` are required");
+    return runAuditedMutation("create_folder", params, capturePlans.folder, async () => {
+      const { type, name, parentFolder, color } = params;
+      if (!type || !name) throw new Error("`type` and `name` are required");
 
-    let parentId = null;
-    if (parentFolder) {
-      const parent = game.folders.get(parentFolder)
-        ?? game.folders.find(f => f.type === type && f.name === parentFolder);
-      if (!parent) throw new Error(`Parent folder "${parentFolder}" not found for type ${type}`);
-      parentId = parent.id;
-    }
+      let parentId = null;
+      if (parentFolder) {
+        const parent = game.folders.get(parentFolder)
+          ?? game.folders.find(f => f.type === type && f.name === parentFolder);
+        if (!parent) throw new Error(`Parent folder "${parentFolder}" not found for type ${type}`);
+        parentId = parent.id;
+      }
 
-    const existing = game.folders.find(f =>
-      f.type === type && f.name === name && (f.folder?.id ?? null) === parentId
-    );
-    if (existing) {
-      return { id: existing.id, name: existing.name, type: existing.type, parent: parentId, existed: true };
-    }
+      const existing = game.folders.find(f =>
+        f.type === type && f.name === name && (f.folder?.id ?? null) === parentId
+      );
+      if (existing) {
+        return { id: existing.id, name: existing.name, type: existing.type, parent: parentId, existed: true };
+      }
 
-    const created = await Folder.create({
-      name, type,
-      folder: parentId,
-      ...(color ? { color } : {})
+      const created = await Folder.create({
+        name, type,
+        folder: parentId,
+        ...(color ? { color } : {})
+      });
+      return { id: created.id, name: created.name, type: created.type, parent: parentId, existed: false };
     });
-    return { id: created.id, name: created.name, type: created.type, parent: parentId, existed: false };
   },
 
   /**
@@ -2350,35 +2401,37 @@ const handlers = {
    * resolved by id, then by exact name (auto-created if missing).
    */
   create_actor_from_compendium: async (params = {}) => {
-    const { pack, documentId, folderId, folderName, nameOverride } = params;
-    if (!pack || !documentId) throw new Error("`pack` and `documentId` are required");
+    return runAuditedMutation("create_actor_from_compendium", params, capturePlans.actor, async () => {
+      const { pack, documentId, folderId, folderName, nameOverride } = params;
+      if (!pack || !documentId) throw new Error("`pack` and `documentId` are required");
 
-    const compendium = game.packs.get(pack);
-    if (!compendium) throw new Error(`Compendium pack "${pack}" not found`);
-    if (compendium.metadata.type !== "Actor") {
-      throw new Error(`Pack "${pack}" holds ${compendium.metadata.type} documents, not Actor`);
-    }
-
-    const resolvedFolderId = await _resolveFolder("Actor", folderId, folderName, true);
-
-    const imported = await game.actors.importFromCompendium(
-      compendium,
-      documentId,
-      {
-        folder: resolvedFolderId,
-        ...(nameOverride ? { name: nameOverride } : {})
+      const compendium = game.packs.get(pack);
+      if (!compendium) throw new Error(`Compendium pack "${pack}" not found`);
+      if (compendium.metadata.type !== "Actor") {
+        throw new Error(`Pack "${pack}" holds ${compendium.metadata.type} documents, not Actor`);
       }
-    );
-    if (!imported) throw new Error(`Failed to import "${documentId}" from "${pack}"`);
 
-    return {
-      id: imported.id,
-      name: imported.name,
-      type: imported.type,
-      folder: resolvedFolderId,
-      sourcePack: pack,
-      sourceDocId: documentId
-    };
+      const resolvedFolderId = await _resolveFolder("Actor", folderId, folderName, true);
+
+      const imported = await game.actors.importFromCompendium(
+        compendium,
+        documentId,
+        {
+          folder: resolvedFolderId,
+          ...(nameOverride ? { name: nameOverride } : {})
+        }
+      );
+      if (!imported) throw new Error(`Failed to import "${documentId}" from "${pack}"`);
+
+      return {
+        id: imported.id,
+        name: imported.name,
+        type: imported.type,
+        folder: resolvedFolderId,
+        sourcePack: pack,
+        sourceDocId: documentId
+      };
+    });
   },
 
   /**
@@ -2387,29 +2440,31 @@ const handlers = {
    * learn the shape for the active system).
    */
   create_actor: async (params = {}) => {
-    const { name, type, system, items, img, prototypeToken, folderId, folderName } = params;
-    if (!name || !type) throw new Error("`name` and `type` are required");
+    return runAuditedMutation("create_actor", params, capturePlans.actor, async () => {
+      const { name, type, system, items, img, prototypeToken, folderId, folderName } = params;
+      if (!name || !type) throw new Error("`name` and `type` are required");
 
-    const resolvedFolderId = await _resolveFolder("Actor", folderId, folderName, true);
+      const resolvedFolderId = await _resolveFolder("Actor", folderId, folderName, true);
 
-    const createData = { name, type, folder: resolvedFolderId };
-    if (system) createData.system = system;
-    if (img) createData.img = img;
-    if (prototypeToken) createData.prototypeToken = prototypeToken;
-    if (Array.isArray(items) && items.length) {
-      createData.items = await Promise.all(items.map(_resolveItemRef));
-    }
+      const createData = { name, type, folder: resolvedFolderId };
+      if (system) createData.system = system;
+      if (img) createData.img = img;
+      if (prototypeToken) createData.prototypeToken = prototypeToken;
+      if (Array.isArray(items) && items.length) {
+        createData.items = await Promise.all(items.map(_resolveItemRef));
+      }
 
-    const created = await Actor.create(createData);
-    if (!created) throw new Error("Actor.create returned no document");
+      const created = await Actor.create(createData);
+      if (!created) throw new Error("Actor.create returned no document");
 
-    return {
-      id: created.id,
-      name: created.name,
-      type: created.type,
-      folder: resolvedFolderId,
-      itemIds: created.items.contents.map(i => i.id)
-    };
+      return {
+        id: created.id,
+        name: created.name,
+        type: created.type,
+        folder: resolvedFolderId,
+        itemIds: created.items.contents.map(i => i.id)
+      };
+    });
   },
 
   /**
@@ -2418,28 +2473,30 @@ const handlers = {
    * (`{ name, type, system?, ... }`).
    */
   add_items_to_actor: async (params = {}) => {
-    const { actorId, items } = params;
-    if (!actorId) throw new Error("`actorId` is required");
-    if (!Array.isArray(items) || items.length === 0) {
-      throw new Error("`items` must be a non-empty array");
-    }
+    return runAuditedMutation("add_items_to_actor", params, capturePlans.actor, async () => {
+      const { actorId, items } = params;
+      if (!actorId) throw new Error("`actorId` is required");
+      if (!Array.isArray(items) || items.length === 0) {
+        throw new Error("`items` must be a non-empty array");
+      }
 
-    const actor = game.actors.get(actorId);
-    if (!actor) throw new Error(`Actor "${actorId}" not found`);
+      const actor = game.actors.get(actorId);
+      if (!actor) throw new Error(`Actor "${actorId}" not found`);
 
-    const resolved = await Promise.all(items.map(_resolveItemRef));
-    const created = await actor.createEmbeddedDocuments("Item", resolved);
+      const resolved = await Promise.all(items.map(_resolveItemRef));
+      const created = await actor.createEmbeddedDocuments("Item", resolved);
 
-    return {
-      actorId,
-      added: created.map((doc, i) => ({
-        id: doc.id,
-        name: doc.name,
-        source: items[i].pack
-          ? `${items[i].pack}/${items[i].documentId}`
-          : "inline"
-      }))
-    };
+      return {
+        actorId,
+        added: created.map((doc, i) => ({
+          id: doc.id,
+          name: doc.name,
+          source: items[i].pack
+            ? `${items[i].pack}/${items[i].documentId}`
+            : "inline"
+        }))
+      };
+    });
   },
 
   /**
@@ -2447,41 +2504,43 @@ const handlers = {
    * "text" with HTML format; specify `text.format: 2` for Markdown.
    */
   create_journal_entry: async (params = {}) => {
-    const { name, pages, folderId, folderName } = params;
-    if (!name) throw new Error("`name` is required");
-    if (!Array.isArray(pages) || pages.length === 0) {
-      throw new Error("`pages` must be a non-empty array");
-    }
-
-    const resolvedFolderId = await _resolveFolder("JournalEntry", folderId, folderName, true);
-
-    const normalizedPages = pages.map((p, i) => {
-      if (!p?.name) throw new Error(`pages[${i}].name is required`);
-      const pageData = { name: p.name, type: p.type ?? "text" };
-      if (pageData.type === "text") {
-        pageData.text = {
-          content: p.text?.content ?? "",
-          format:  p.text?.format  ?? 1
-        };
-      } else if (p.src) {
-        pageData.src = p.src;
+    return runAuditedMutation("create_journal_entry", params, capturePlans.journal, async () => {
+      const { name, pages, folderId, folderName } = params;
+      if (!name) throw new Error("`name` is required");
+      if (!Array.isArray(pages) || pages.length === 0) {
+        throw new Error("`pages` must be a non-empty array");
       }
-      return pageData;
-    });
 
-    const created = await JournalEntry.create({
-      name,
-      folder: resolvedFolderId,
-      pages: normalizedPages
-    });
-    if (!created) throw new Error("JournalEntry.create returned no document");
+      const resolvedFolderId = await _resolveFolder("JournalEntry", folderId, folderName, true);
 
-    return {
-      id: created.id,
-      name: created.name,
-      folder: resolvedFolderId,
-      pageIds: created.pages.contents.map(p => p.id)
-    };
+      const normalizedPages = pages.map((p, i) => {
+        if (!p?.name) throw new Error(`pages[${i}].name is required`);
+        const pageData = { name: p.name, type: p.type ?? "text" };
+        if (pageData.type === "text") {
+          pageData.text = {
+            content: p.text?.content ?? "",
+            format:  p.text?.format  ?? 1
+          };
+        } else if (p.src) {
+          pageData.src = p.src;
+        }
+        return pageData;
+      });
+
+      const created = await JournalEntry.create({
+        name,
+        folder: resolvedFolderId,
+        pages: normalizedPages
+      });
+      if (!created) throw new Error("JournalEntry.create returned no document");
+
+      return {
+        id: created.id,
+        name: created.name,
+        folder: resolvedFolderId,
+        pageIds: created.pages.contents.map(p => p.id)
+      };
+    });
   },
 
   /**
@@ -2491,37 +2550,39 @@ const handlers = {
    * must be provided.
    */
   update_journal_page: async (params = {}) => {
-    const { journalId, pageId, name, content, appendContent } = params;
-    if (!journalId || !pageId) throw new Error("`journalId` and `pageId` are required");
+    return runAuditedMutation("update_journal_page", params, capturePlans.journal, async () => {
+      const { journalId, pageId, name, content, appendContent } = params;
+      if (!journalId || !pageId) throw new Error("`journalId` and `pageId` are required");
 
-    const journal = game.journal.get(journalId);
-    if (!journal) throw new Error(`Journal "${journalId}" not found`);
+      const journal = game.journal.get(journalId);
+      if (!journal) throw new Error(`Journal "${journalId}" not found`);
 
-    const page = journal.pages.get(pageId);
-    if (!page) throw new Error(`Page "${pageId}" not found in journal "${journalId}"`);
+      const page = journal.pages.get(pageId);
+      if (!page) throw new Error(`Page "${pageId}" not found in journal "${journalId}"`);
 
-    const updateData = {};
-    const fieldsUpdated = [];
+      const updateData = {};
+      const fieldsUpdated = [];
 
-    if (typeof name === "string") {
-      updateData.name = name;
-      fieldsUpdated.push("name");
-    }
-    if (typeof content === "string") {
-      updateData["text.content"] = content;
-      fieldsUpdated.push("text.content (replaced)");
-    } else if (typeof appendContent === "string") {
-      const current = page.text?.content ?? "";
-      updateData["text.content"] = current + appendContent;
-      fieldsUpdated.push("text.content (appended)");
-    }
+      if (typeof name === "string") {
+        updateData.name = name;
+        fieldsUpdated.push("name");
+      }
+      if (typeof content === "string") {
+        updateData["text.content"] = content;
+        fieldsUpdated.push("text.content (replaced)");
+      } else if (typeof appendContent === "string") {
+        const current = page.text?.content ?? "";
+        updateData["text.content"] = current + appendContent;
+        fieldsUpdated.push("text.content (appended)");
+      }
 
-    if (fieldsUpdated.length === 0) {
-      throw new Error("Provide at least one of: `name`, `content`, `appendContent`");
-    }
+      if (fieldsUpdated.length === 0) {
+        throw new Error("Provide at least one of: `name`, `content`, `appendContent`");
+      }
 
-    await page.update(updateData);
-    return { journalId, pageId, fieldsUpdated };
+      await page.update(updateData);
+      return { journalId, pageId, fieldsUpdated };
+    });
   },
 
   // -------------------------------------------------------------------------
@@ -2535,143 +2596,159 @@ const handlers = {
    *  folder to null) rather than cascading by default — use `deleteContents`
    *  to wipe the contents along with the folder. */
   delete_folder: async (params = {}) => {
-    const { folderId, deleteContents } = params;
-    if (!folderId) throw new Error("`folderId` is required");
-    const folder = game.folders.get(folderId);
-    if (!folder) throw new Error(`Folder "${folderId}" not found`);
-    const meta = { id: folder.id, name: folder.name, type: folder.type };
-    await folder.delete({ deleteSubfolders: !!deleteContents, deleteContents: !!deleteContents });
-    return { ...meta, deleted: true, deleteContents: !!deleteContents };
+    return runAuditedMutation("delete_folder", params, capturePlans.folder, async () => {
+      const { folderId, deleteContents } = params;
+      if (!folderId) throw new Error("`folderId` is required");
+      const folder = game.folders.get(folderId);
+      if (!folder) throw new Error(`Folder "${folderId}" not found`);
+      const meta = { id: folder.id, name: folder.name, type: folder.type };
+      await folder.delete({ deleteSubfolders: !!deleteContents, deleteContents: !!deleteContents });
+      return { ...meta, deleted: true, deleteContents: !!deleteContents };
+    });
   },
 
   /** Delete an actor by id. Permanent — Foundry's undo doesn't cover document
    *  deletion. The LLM should `get_actor` first if any data needs to be
    *  preserved. */
   delete_actor: async (params = {}) => {
-    const { actorId } = params;
-    if (!actorId) throw new Error("`actorId` is required");
-    const actor = game.actors.get(actorId);
-    if (!actor) throw new Error(`Actor "${actorId}" not found`);
-    const meta = { id: actor.id, name: actor.name, type: actor.type };
-    await actor.delete();
-    return { ...meta, deleted: true };
+    return runAuditedMutation("delete_actor", params, capturePlans.actor, async () => {
+      const { actorId } = params;
+      if (!actorId) throw new Error("`actorId` is required");
+      const actor = game.actors.get(actorId);
+      if (!actor) throw new Error(`Actor "${actorId}" not found`);
+      const meta = { id: actor.id, name: actor.name, type: actor.type };
+      await actor.delete();
+      return { ...meta, deleted: true };
+    });
   },
 
   /** Patch an existing actor's top-level fields and/or system data. Use this
    *  to tweak HP/stats/name/img after `create_actor_from_compendium` instead
    *  of recreating the actor from scratch. */
   update_actor: async (params = {}) => {
-    const { actorId, name, img, system, prototypeToken } = params;
-    if (!actorId) throw new Error("`actorId` is required");
-    const actor = game.actors.get(actorId);
-    if (!actor) throw new Error(`Actor "${actorId}" not found`);
+    return runAuditedMutation("update_actor", params, capturePlans.actor, async () => {
+      const { actorId, name, img, system, prototypeToken } = params;
+      if (!actorId) throw new Error("`actorId` is required");
+      const actor = game.actors.get(actorId);
+      if (!actor) throw new Error(`Actor "${actorId}" not found`);
 
-    const updateData = {};
-    const fieldsUpdated = [];
-    if (typeof name === "string")        { updateData.name = name;                       fieldsUpdated.push("name"); }
-    if (typeof img === "string")         { updateData.img = img;                         fieldsUpdated.push("img"); }
-    if (system && typeof system === "object")
-                                         { updateData.system = system;                   fieldsUpdated.push("system"); }
-    if (prototypeToken && typeof prototypeToken === "object")
-                                         { updateData.prototypeToken = prototypeToken;   fieldsUpdated.push("prototypeToken"); }
+      const updateData = {};
+      const fieldsUpdated = [];
+      if (typeof name === "string")        { updateData.name = name;                       fieldsUpdated.push("name"); }
+      if (typeof img === "string")         { updateData.img = img;                         fieldsUpdated.push("img"); }
+      if (system && typeof system === "object")
+                                           { updateData.system = system;                   fieldsUpdated.push("system"); }
+      if (prototypeToken && typeof prototypeToken === "object")
+                                           { updateData.prototypeToken = prototypeToken;   fieldsUpdated.push("prototypeToken"); }
 
-    if (fieldsUpdated.length === 0) {
-      throw new Error("Provide at least one of: `name`, `img`, `system`, `prototypeToken`");
-    }
+      if (fieldsUpdated.length === 0) {
+        throw new Error("Provide at least one of: `name`, `img`, `system`, `prototypeToken`");
+      }
 
-    await actor.update(updateData);
-    return { actorId, fieldsUpdated };
+      await actor.update(updateData);
+      return { actorId, fieldsUpdated };
+    });
   },
 
   /** Remove embedded items from an actor by id. Items not found on the actor
    *  are reported in `missing`; the rest are deleted. */
   delete_items_from_actor: async (params = {}) => {
-    const { actorId, itemIds } = params;
-    if (!actorId) throw new Error("`actorId` is required");
-    if (!Array.isArray(itemIds) || itemIds.length === 0) {
-      throw new Error("`itemIds` must be a non-empty array");
-    }
-    const actor = game.actors.get(actorId);
-    if (!actor) throw new Error(`Actor "${actorId}" not found`);
+    return runAuditedMutation("delete_items_from_actor", params, capturePlans.actor, async () => {
+      const { actorId, itemIds } = params;
+      if (!actorId) throw new Error("`actorId` is required");
+      if (!Array.isArray(itemIds) || itemIds.length === 0) {
+        throw new Error("`itemIds` must be a non-empty array");
+      }
+      const actor = game.actors.get(actorId);
+      if (!actor) throw new Error(`Actor "${actorId}" not found`);
 
-    const present = itemIds.filter(id => actor.items.get(id));
-    const missing = itemIds.filter(id => !actor.items.get(id));
+      const present = itemIds.filter(id => actor.items.get(id));
+      const missing = itemIds.filter(id => !actor.items.get(id));
 
-    if (present.length === 0) {
-      return { actorId, deleted: [], missing };
-    }
+      if (present.length === 0) {
+        return { actorId, deleted: [], missing };
+      }
 
-    const deletedSnapshot = present.map(id => {
-      const it = actor.items.get(id);
-      return { id, name: it.name, type: it.type };
+      const deletedSnapshot = present.map(id => {
+        const it = actor.items.get(id);
+        return { id, name: it.name, type: it.type };
+      });
+      await actor.deleteEmbeddedDocuments("Item", present);
+      return { actorId, deleted: deletedSnapshot, missing };
     });
-    await actor.deleteEmbeddedDocuments("Item", present);
-    return { actorId, deleted: deletedSnapshot, missing };
   },
 
   /** Patch a single embedded item on an actor. `data` is merged into the
    *  item's document (top-level fields like `name`/`img`/`system.*`). */
   update_item_on_actor: async (params = {}) => {
-    const { actorId, itemId, data } = params;
-    if (!actorId || !itemId) throw new Error("`actorId` and `itemId` are required");
-    if (!data || typeof data !== "object") {
-      throw new Error("`data` must be an object with fields to update");
-    }
-    const actor = game.actors.get(actorId);
-    if (!actor) throw new Error(`Actor "${actorId}" not found`);
-    const item = actor.items.get(itemId);
-    if (!item) throw new Error(`Item "${itemId}" not found on actor "${actorId}"`);
+    return runAuditedMutation("update_item_on_actor", params, capturePlans.actor, async () => {
+      const { actorId, itemId, data } = params;
+      if (!actorId || !itemId) throw new Error("`actorId` and `itemId` are required");
+      if (!data || typeof data !== "object") {
+        throw new Error("`data` must be an object with fields to update");
+      }
+      const actor = game.actors.get(actorId);
+      if (!actor) throw new Error(`Actor "${actorId}" not found`);
+      const item = actor.items.get(itemId);
+      if (!item) throw new Error(`Item "${itemId}" not found on actor "${actorId}"`);
 
-    await actor.updateEmbeddedDocuments("Item", [{ _id: itemId, ...data }]);
-    return { actorId, itemId, fieldsUpdated: Object.keys(data) };
+      await actor.updateEmbeddedDocuments("Item", [{ _id: itemId, ...data }]);
+      return { actorId, itemId, fieldsUpdated: Object.keys(data) };
+    });
   },
 
   /** Delete a journal entry by id. Removes all pages with it. */
   delete_journal_entry: async (params = {}) => {
-    const { journalId } = params;
-    if (!journalId) throw new Error("`journalId` is required");
-    const journal = game.journal.get(journalId);
-    if (!journal) throw new Error(`Journal "${journalId}" not found`);
-    const meta = { id: journal.id, name: journal.name, pageCount: journal.pages.size };
-    await journal.delete();
-    return { ...meta, deleted: true };
+    return runAuditedMutation("delete_journal_entry", params, capturePlans.journal, async () => {
+      const { journalId } = params;
+      if (!journalId) throw new Error("`journalId` is required");
+      const journal = game.journal.get(journalId);
+      if (!journal) throw new Error(`Journal "${journalId}" not found`);
+      const meta = { id: journal.id, name: journal.name, pageCount: journal.pages.size };
+      await journal.delete();
+      return { ...meta, deleted: true };
+    });
   },
 
   /** Delete a single page from a journal entry, leaving the entry itself. */
   delete_journal_page: async (params = {}) => {
-    const { journalId, pageId } = params;
-    if (!journalId || !pageId) throw new Error("`journalId` and `pageId` are required");
-    const journal = game.journal.get(journalId);
-    if (!journal) throw new Error(`Journal "${journalId}" not found`);
-    const page = journal.pages.get(pageId);
-    if (!page) throw new Error(`Page "${pageId}" not found in journal "${journalId}"`);
-    const meta = { journalId, pageId, name: page.name };
-    await journal.deleteEmbeddedDocuments("JournalEntryPage", [pageId]);
-    return { ...meta, deleted: true };
+    return runAuditedMutation("delete_journal_page", params, capturePlans.journal, async () => {
+      const { journalId, pageId } = params;
+      if (!journalId || !pageId) throw new Error("`journalId` and `pageId` are required");
+      const journal = game.journal.get(journalId);
+      if (!journal) throw new Error(`Journal "${journalId}" not found`);
+      const page = journal.pages.get(pageId);
+      if (!page) throw new Error(`Page "${pageId}" not found in journal "${journalId}"`);
+      const meta = { journalId, pageId, name: page.name };
+      await journal.deleteEmbeddedDocuments("JournalEntryPage", [pageId]);
+      return { ...meta, deleted: true };
+    });
   },
 
   /** Add a new page to an existing journal entry. Page shape matches
    *  `create_journal_entry`'s pages[] entries. Returns the new page id. */
   add_page_to_journal_entry: async (params = {}) => {
-    const { journalId, page } = params;
-    if (!journalId) throw new Error("`journalId` is required");
-    if (!page?.name) throw new Error("`page.name` is required");
-    const journal = game.journal.get(journalId);
-    if (!journal) throw new Error(`Journal "${journalId}" not found`);
+    return runAuditedMutation("add_page_to_journal_entry", params, capturePlans.journal, async () => {
+      const { journalId, page } = params;
+      if (!journalId) throw new Error("`journalId` is required");
+      if (!page?.name) throw new Error("`page.name` is required");
+      const journal = game.journal.get(journalId);
+      if (!journal) throw new Error(`Journal "${journalId}" not found`);
 
-    const pageData = { name: page.name, type: page.type ?? "text" };
-    if (pageData.type === "text") {
-      pageData.text = {
-        content: page.text?.content ?? "",
-        format:  page.text?.format  ?? 1
-      };
-    } else if (page.src) {
-      pageData.src = page.src;
-    }
+      const pageData = { name: page.name, type: page.type ?? "text" };
+      if (pageData.type === "text") {
+        pageData.text = {
+          content: page.text?.content ?? "",
+          format:  page.text?.format  ?? 1
+        };
+      } else if (page.src) {
+        pageData.src = page.src;
+      }
 
-    const [created] = await journal.createEmbeddedDocuments("JournalEntryPage", [pageData]);
-    if (!created) throw new Error("Journal page create returned no document");
-    return { journalId, pageId: created.id, name: created.name };
+      const [created] = await journal.createEmbeddedDocuments("JournalEntryPage", [pageData]);
+      if (!created) throw new Error("Journal page create returned no document");
+      return { journalId, pageId: created.id, name: created.name };
+    });
   },
 
   // -------------------------------------------------------------------------
@@ -2688,42 +2765,44 @@ const handlers = {
    * fields via the optional params.
    */
   create_token: async (params = {}) => {
-    const { actorId, sceneId, x, y, gridX, gridY, hidden, name, rotation } = params;
-    if (!actorId) throw new Error("`actorId` is required");
+    return runAuditedMutation("create_token", params, capturePlans.tokens, async () => {
+      const { actorId, sceneId, x, y, gridX, gridY, hidden, name, rotation } = params;
+      if (!actorId) throw new Error("`actorId` is required");
 
-    const actor = game.actors.get(actorId);
-    if (!actor) throw new Error(`Actor "${actorId}" not found`);
+      const actor = game.actors.get(actorId);
+      if (!actor) throw new Error(`Actor "${actorId}" not found`);
 
-    const scene = sceneId
-      ? game.scenes.get(sceneId)
-      : (game.scenes.active ?? canvas.scene);
-    if (!scene) throw new Error(sceneId ? `Scene "${sceneId}" not found` : "No active scene to place token in");
+      const scene = sceneId
+        ? game.scenes.get(sceneId)
+        : (game.scenes.active ?? canvas.scene);
+      if (!scene) throw new Error(sceneId ? `Scene "${sceneId}" not found` : "No active scene to place token in");
 
-    let finalX = x, finalY = y;
-    if (gridX != null || gridY != null) {
-      // v11+: scene.grid is a BaseGrid instance with .size; pre-v11: scene.grid is a number.
-      const g = scene.grid;
-      const gridSize = (g && typeof g === "object") ? g.size : g;
-      if (!gridSize) throw new Error("Scene has no grid; pass x/y in pixels instead");
-      finalX = (gridX ?? 0) * gridSize;
-      finalY = (gridY ?? 0) * gridSize;
-    }
-    if (finalX == null || finalY == null) {
-      throw new Error("Provide coordinates: either x+y (pixels) or gridX+gridY (cells)");
-    }
+      let finalX = x, finalY = y;
+      if (gridX != null || gridY != null) {
+        // v11+: scene.grid is a BaseGrid instance with .size; pre-v11: scene.grid is a number.
+        const g = scene.grid;
+        const gridSize = (g && typeof g === "object") ? g.size : g;
+        if (!gridSize) throw new Error("Scene has no grid; pass x/y in pixels instead");
+        finalX = (gridX ?? 0) * gridSize;
+        finalY = (gridY ?? 0) * gridSize;
+      }
+      if (finalX == null || finalY == null) {
+        throw new Error("Provide coordinates: either x+y (pixels) or gridX+gridY (cells)");
+      }
 
-    const protoDoc = await actor.getTokenDocument({ x: finalX, y: finalY });
-    const tokenData = protoDoc.toObject();
-    if (typeof hidden === "boolean")  tokenData.hidden   = hidden;
-    if (typeof name === "string")     tokenData.name     = name;
-    if (typeof rotation === "number") tokenData.rotation = rotation;
+      const protoDoc = await actor.getTokenDocument({ x: finalX, y: finalY });
+      const tokenData = protoDoc.toObject();
+      if (typeof hidden === "boolean")  tokenData.hidden   = hidden;
+      if (typeof name === "string")     tokenData.name     = name;
+      if (typeof rotation === "number") tokenData.rotation = rotation;
 
-    const [created] = await scene.createEmbeddedDocuments("Token", [tokenData]);
-    if (!created) throw new Error("Token create returned no document");
-    return {
-      id: created.id, sceneId: scene.id, actorId: actor.id,
-      name: created.name, x: created.x, y: created.y, hidden: created.hidden
-    };
+      const [created] = await scene.createEmbeddedDocuments("Token", [tokenData]);
+      if (!created) throw new Error("Token create returned no document");
+      return {
+        id: created.id, sceneId: scene.id, actorId: actor.id,
+        name: created.name, x: created.x, y: created.y, hidden: created.hidden
+      };
+    });
   },
 
   /**
@@ -2737,41 +2816,43 @@ const handlers = {
    * ownership — to clear a user's permission, set them to "NONE" explicitly.
    */
   set_actor_ownership: async (params = {}) => {
-    const { actorId, ownership } = params;
-    if (!actorId) throw new Error("`actorId` is required");
-    if (!ownership || typeof ownership !== "object") {
-      throw new Error("`ownership` is required and must be an object map of user → level");
-    }
-    const actor = game.actors.get(actorId);
-    if (!actor) throw new Error(`Actor "${actorId}" not found`);
-
-    const LEVELS = CONST.DOCUMENT_OWNERSHIP_LEVELS;
-    const validNames = Object.keys(LEVELS);
-    const resolveLevel = (v) => {
-      if (typeof v === "number") return v;
-      if (typeof v !== "string") throw new Error(`Invalid ownership level value: ${v}`);
-      const upper = v.toUpperCase();
-      if (upper in LEVELS) return LEVELS[upper];
-      throw new Error(`Unknown ownership level "${v}". Use one of: ${validNames.join(", ")}`);
-    };
-
-    const newOwnership = { ...actor.ownership };
-    const changed = [];
-    for (const [key, val] of Object.entries(ownership)) {
-      const level = resolveLevel(val);
-      if (key === "default") {
-        newOwnership.default = level;
-        changed.push({ user: "default", level: val });
-        continue;
+    return runAuditedMutation("set_actor_ownership", params, capturePlans.actor, async () => {
+      const { actorId, ownership } = params;
+      if (!actorId) throw new Error("`actorId` is required");
+      if (!ownership || typeof ownership !== "object") {
+        throw new Error("`ownership` is required and must be an object map of user → level");
       }
-      let user = game.users.get(key) ?? game.users.find(u => u.name === key);
-      if (!user) throw new Error(`User "${key}" not found (not a userId nor an exact userName)`);
-      newOwnership[user.id] = level;
-      changed.push({ userId: user.id, userName: user.name, level: val });
-    }
+      const actor = game.actors.get(actorId);
+      if (!actor) throw new Error(`Actor "${actorId}" not found`);
 
-    await actor.update({ ownership: newOwnership });
-    return { actorId, actorName: actor.name, changed };
+      const LEVELS = CONST.DOCUMENT_OWNERSHIP_LEVELS;
+      const validNames = Object.keys(LEVELS);
+      const resolveLevel = (v) => {
+        if (typeof v === "number") return v;
+        if (typeof v !== "string") throw new Error(`Invalid ownership level value: ${v}`);
+        const upper = v.toUpperCase();
+        if (upper in LEVELS) return LEVELS[upper];
+        throw new Error(`Unknown ownership level "${v}". Use one of: ${validNames.join(", ")}`);
+      };
+
+      const newOwnership = { ...actor.ownership };
+      const changed = [];
+      for (const [key, val] of Object.entries(ownership)) {
+        const level = resolveLevel(val);
+        if (key === "default") {
+          newOwnership.default = level;
+          changed.push({ user: "default", level: val });
+          continue;
+        }
+        let user = game.users.get(key) ?? game.users.find(u => u.name === key);
+        if (!user) throw new Error(`User "${key}" not found (not a userId nor an exact userName)`);
+        newOwnership[user.id] = level;
+        changed.push({ userId: user.id, userName: user.name, level: val });
+      }
+
+      await actor.update({ ownership: newOwnership });
+      return { actorId, actorName: actor.name, changed };
+    });
   },
 
   /**
@@ -2858,50 +2939,54 @@ const handlers = {
    * before starting. `rollInitiative` can be "all", "npc", or false.
    */
   start_combat: async (params = {}) => {
-    const { tokenIds, rollInitiative } = params;
+    return runAuditedMutation("start_combat", params, capturePlans.combat, async () => {
+      const { tokenIds, rollInitiative } = params;
 
-    let combat = game.combat;
-    if (combat?.started) {
-      return { started: false, reason: "Combat already in progress", combatId: combat.id, round: combat.round };
-    }
+      let combat = game.combat;
+      if (combat?.started) {
+        return { started: false, reason: "Combat already in progress", combatId: combat.id, round: combat.round };
+      }
 
-    if (!combat) {
-      const sceneId = canvas.scene?.id ?? game.scenes.active?.id;
-      if (!sceneId) throw new Error("No active scene to create combat on");
-      combat = await Combat.create({ scene: sceneId });
-      if (!combat) throw new Error("Failed to create combat encounter");
-    }
+      if (!combat) {
+        const sceneId = canvas.scene?.id ?? game.scenes.active?.id;
+        if (!sceneId) throw new Error("No active scene to create combat on");
+        combat = await Combat.create({ scene: sceneId });
+        if (!combat) throw new Error("Failed to create combat encounter");
+      }
 
-    if (Array.isArray(tokenIds) && tokenIds.length) {
-      const sceneId = combat.scene?.id;
-      if (!sceneId) throw new Error("Combat has no scene to source tokens from");
-      const combatantsData = tokenIds.map(id => ({ tokenId: id, sceneId }));
-      await combat.createEmbeddedDocuments("Combatant", combatantsData);
-    }
+      if (Array.isArray(tokenIds) && tokenIds.length) {
+        const sceneId = combat.scene?.id;
+        if (!sceneId) throw new Error("Combat has no scene to source tokens from");
+        const combatantsData = tokenIds.map(id => ({ tokenId: id, sceneId }));
+        await combat.createEmbeddedDocuments("Combatant", combatantsData);
+      }
 
-    if (rollInitiative === "all" || rollInitiative === true) {
-      await combat.rollAll();
-    } else if (rollInitiative === "npc") {
-      await combat.rollNPC();
-    }
+      if (rollInitiative === "all" || rollInitiative === true) {
+        await combat.rollAll();
+      } else if (rollInitiative === "npc") {
+        await combat.rollNPC();
+      }
 
-    await combat.startCombat();
-    return {
-      started: true,
-      combatId: combat.id,
-      round: combat.round,
-      combatantCount: combat.combatants.size,
-      currentCombatantId: combat.combatant?.id ?? null
-    };
+      await combat.startCombat();
+      return {
+        started: true,
+        combatId: combat.id,
+        round: combat.round,
+        combatantCount: combat.combatants.size,
+        currentCombatantId: combat.combatant?.id ?? null
+      };
+    });
   },
 
   /** End the active combat encounter (deletes it). */
-  end_combat: async () => {
-    const combat = game.combat;
-    if (!combat) throw new Error("No active combat");
-    const meta = { id: combat.id, round: combat.round, combatantCount: combat.combatants.size };
-    await combat.delete();
-    return { ...meta, ended: true };
+  end_combat: async (params = {}) => {
+    return runAuditedMutation("end_combat", params, capturePlans.combat, async () => {
+      const combat = game.combat;
+      if (!combat) throw new Error("No active combat");
+      const meta = { id: combat.id, round: combat.round, combatantCount: combat.combatants.size };
+      await combat.delete();
+      return { ...meta, ended: true };
+    });
   },
 
   /**
@@ -2909,22 +2994,24 @@ const handlers = {
    * to step backward. Foundry handles round transitions automatically.
    */
   advance_combat: async (params = {}) => {
-    const { direction = "next" } = params;
-    const combat = game.combat;
-    if (!combat) throw new Error("No active combat");
-    if (!combat.started) throw new Error("Combat not started — call start_combat first");
+    return runAuditedMutation("advance_combat", params, capturePlans.combat, async () => {
+      const { direction = "next" } = params;
+      const combat = game.combat;
+      if (!combat) throw new Error("No active combat");
+      if (!combat.started) throw new Error("Combat not started — call start_combat first");
 
-    if (direction === "next")          await combat.nextTurn();
-    else if (direction === "previous") await combat.previousTurn();
-    else throw new Error(`Unknown direction "${direction}". Use "next" or "previous".`);
+      if (direction === "next")          await combat.nextTurn();
+      else if (direction === "previous") await combat.previousTurn();
+      else throw new Error(`Unknown direction "${direction}". Use "next" or "previous".`);
 
-    const cur = combat.combatant;
-    return {
-      combatId: combat.id,
-      round: combat.round,
-      turn: combat.turn,
-      currentCombatant: cur ? { id: cur.id, name: cur.name, initiative: cur.initiative } : null
-    };
+      const cur = combat.combatant;
+      return {
+        combatId: combat.id,
+        round: combat.round,
+        turn: combat.turn,
+        currentCombatant: cur ? { id: cur.id, name: cur.name, initiative: cur.initiative } : null
+      };
+    });
   },
 
   // -------------------------------------------------------------------------
@@ -2976,67 +3063,69 @@ const handlers = {
    * accepts a userName or array of userNames.
    */
   send_chat_message: async (params = {}) => {
-    const { content, speaker, actorId, tokenId, whisperTo, type } = params;
-    if (!content) throw new Error("`content` is required");
+    return runAuditedMutation("send_chat_message", params, capturePlans.messages, async () => {
+      const { content, speaker, actorId, tokenId, whisperTo, type } = params;
+      if (!content) throw new Error("`content` is required");
 
-    const data = { content };
+      const data = { content };
 
-    // ChatMessage style field renamed from `type` → `style` in Foundry v12+.
-    // We're compat v12 minimum, so use `style` exclusively. CONST has both
-    // CHAT_MESSAGE_STYLES (new, preferred) and CHAT_MESSAGE_TYPES (legacy alias)
-    // — read either, write to data.style.
-    const styleConsts = CONST.CHAT_MESSAGE_STYLES ?? CONST.CHAT_MESSAGE_TYPES;
-    if (typeof type === "string") {
-      const v = styleConsts?.[type.toUpperCase()];
-      if (v !== undefined) data.style = v;
-    } else if (typeof type === "number") {
-      data.style = type;
-    }
-
-    // Speaker
-    if (speaker || actorId || tokenId) {
-      const sp = {};
-      if (actorId) {
-        const actor = game.actors.get(actorId);
-        if (!actor) throw new Error(`Actor "${actorId}" not found`);
-        sp.actor = actor.id;
-        sp.alias = speaker ?? actor.name;
+      // ChatMessage style field renamed from `type` → `style` in Foundry v12+.
+      // We're compat v12 minimum, so use `style` exclusively. CONST has both
+      // CHAT_MESSAGE_STYLES (new, preferred) and CHAT_MESSAGE_TYPES (legacy alias)
+      // — read either, write to data.style.
+      const styleConsts = CONST.CHAT_MESSAGE_STYLES ?? CONST.CHAT_MESSAGE_TYPES;
+      if (typeof type === "string") {
+        const v = styleConsts?.[type.toUpperCase()];
+        if (v !== undefined) data.style = v;
+      } else if (typeof type === "number") {
+        data.style = type;
       }
-      if (tokenId) {
-        const scene = canvas.scene ?? game.scenes.active;
-        const token = scene?.tokens.get(tokenId);
-        if (!token) throw new Error(`Token "${tokenId}" not found on the active scene`);
-        sp.token = token.id;
-        sp.scene = scene.id;
-      }
-      if (typeof speaker === "string" && !sp.alias) sp.alias = speaker;
-      data.speaker = sp;
-    } else {
-      data.speaker = ChatMessage.getSpeaker({ user: game.user });
-    }
 
-    // Whisper
-    if (whisperTo) {
-      const recipients = Array.isArray(whisperTo) ? whisperTo : [whisperTo];
-      data.whisper = [];
-      for (const rcpt of recipients) {
-        const user = game.users.get(rcpt) ?? game.users.find(u => u.name === rcpt);
-        if (!user) throw new Error(`User "${rcpt}" not found`);
-        data.whisper.push(user.id);
+      // Speaker
+      if (speaker || actorId || tokenId) {
+        const sp = {};
+        if (actorId) {
+          const actor = game.actors.get(actorId);
+          if (!actor) throw new Error(`Actor "${actorId}" not found`);
+          sp.actor = actor.id;
+          sp.alias = speaker ?? actor.name;
+        }
+        if (tokenId) {
+          const scene = canvas.scene ?? game.scenes.active;
+          const token = scene?.tokens.get(tokenId);
+          if (!token) throw new Error(`Token "${tokenId}" not found on the active scene`);
+          sp.token = token.id;
+          sp.scene = scene.id;
+        }
+        if (typeof speaker === "string" && !sp.alias) sp.alias = speaker;
+        data.speaker = sp;
+      } else {
+        data.speaker = ChatMessage.getSpeaker({ user: game.user });
       }
-    }
 
-    const msg = await ChatMessage.create(data);
-    if (!msg) {
-      throw new Error("ChatMessage.create returned no document — possible cause: invalid speaker/whisper/style field for this Foundry version");
-    }
-    return {
-      id: msg.id,
-      timestamp: msg.timestamp,
-      speaker: msg.speaker,
-      whisperedTo: (msg.whisper ?? []).map(uid => game.users.get(uid)?.name ?? uid),
-      contentPreview: String(msg.content).slice(0, 80)
-    };
+      // Whisper
+      if (whisperTo) {
+        const recipients = Array.isArray(whisperTo) ? whisperTo : [whisperTo];
+        data.whisper = [];
+        for (const rcpt of recipients) {
+          const user = game.users.get(rcpt) ?? game.users.find(u => u.name === rcpt);
+          if (!user) throw new Error(`User "${rcpt}" not found`);
+          data.whisper.push(user.id);
+        }
+      }
+
+      const msg = await ChatMessage.create(data);
+      if (!msg) {
+        throw new Error("ChatMessage.create returned no document — possible cause: invalid speaker/whisper/style field for this Foundry version");
+      }
+      return {
+        id: msg.id,
+        timestamp: msg.timestamp,
+        speaker: msg.speaker,
+        whisperedTo: (msg.whisper ?? []).map(uid => game.users.get(uid)?.name ?? uid),
+        contentPreview: String(msg.content).slice(0, 80)
+      };
+    });
   },
 
   // -------------------------------------------------------------------------
@@ -3053,73 +3142,77 @@ const handlers = {
    * the standard 15s — see world-authoring.js registration.
    */
   request_roll: async (params = {}) => {
-    const { formula, prompt = "The GM is requesting a roll.", timeoutSeconds = 60, label, autoAccept } = params;
-    if (!formula || typeof formula !== "string") throw new Error("`formula` is required (e.g. '1d20+5')");
+    return runAuditedMutation("request_roll", params, capturePlans.messages, async () => {
+      const { formula, prompt = "The GM is requesting a roll.", timeoutSeconds = 60, label, autoAccept } = params;
+      if (!formula || typeof formula !== "string") throw new Error("`formula` is required (e.g. '1d20+5')");
 
-    // Auto-accept short-circuit: roll immediately, post to chat, return.
-    if (autoAccept) {
-      const roll = await new Roll(formula).evaluate();
-      await roll.toMessage({ speaker: ChatMessage.getSpeaker(), flavor: label ?? prompt });
-      return {
-        mode: "auto_rolled",
-        formula,
-        total: roll.total,
-        result: roll.result,
-        dice: roll.dice.map(d => ({ faces: d.faces, results: d.results.map(x => x.result) }))
-      };
-    }
+      // Auto-accept short-circuit: roll immediately, post to chat, return.
+      if (autoAccept) {
+        const roll = await new Roll(formula).evaluate();
+        const msg = await roll.toMessage({ speaker: ChatMessage.getSpeaker(), flavor: label ?? prompt });
+        return {
+          mode: "auto_rolled",
+          formula,
+          total: roll.total,
+          result: roll.result,
+          dice: roll.dice.map(d => ({ faces: d.faces, results: d.results.map(x => x.result) })),
+          messages: [msg.id] // for the capturePlan.after
+        };
+      }
 
-    const escapeHtml = (s) => String(s).replace(/[&<>"']/g, c =>
-      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+      const escapeHtml = (s) => String(s).replace(/[&<>"']/g, c =>
+        ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
-    return new Promise((resolve) => {
-      let resolved = false;
-      let dialog;
+      return new Promise((resolve) => {
+        let resolved = false;
+        let dialog;
 
-      const finalize = (result) => {
-        if (resolved) return;
-        resolved = true;
-        clearTimeout(timer);
-        try { dialog?.close(); } catch {}
-        resolve(result);
-      };
+        const finalize = (result) => {
+          if (resolved) return;
+          resolved = true;
+          clearTimeout(timer);
+          try { dialog?.close(); } catch {}
+          resolve(result);
+        };
 
-      const timer = setTimeout(() => finalize({ mode: "timed_out", formula }), timeoutSeconds * 1000);
+        const timer = setTimeout(() => finalize({ mode: "timed_out", formula }), timeoutSeconds * 1000);
 
-      dialog = new Dialog({
-        title: label ? `Roll Request: ${label}` : "Roll Request",
-        content: `<div style="padding: 8px;">
-            <p>${escapeHtml(prompt)}</p>
-            <p><strong>Roll:</strong> <code>${escapeHtml(formula)}</code></p>
-          </div>`,
-        buttons: {
-          roll: {
-            label: "Roll",
-            callback: async () => {
-              try {
-                const roll = await new Roll(formula).evaluate();
-                await roll.toMessage({ speaker: ChatMessage.getSpeaker(), flavor: label ?? prompt });
-                finalize({
-                  mode: "rolled",
-                  formula,
-                  total: roll.total,
-                  result: roll.result,
-                  dice: roll.dice.map(d => ({ faces: d.faces, results: d.results.map(x => x.result) }))
-                });
-              } catch (err) {
-                finalize({ mode: "error", formula, error: err.message });
+        dialog = new Dialog({
+          title: label ? `Roll Request: ${label}` : "Roll Request",
+          content: `<div style="padding: 8px;">
+              <p>${escapeHtml(prompt)}</p>
+              <p><strong>Roll:</strong> <code>${escapeHtml(formula)}</code></p>
+            </div>`,
+          buttons: {
+            roll: {
+              label: "Roll",
+              callback: async () => {
+                try {
+                  const roll = await new Roll(formula).evaluate();
+                  const msg = await roll.toMessage({ speaker: ChatMessage.getSpeaker(), flavor: label ?? prompt });
+                  finalize({
+                    mode: "rolled",
+                    formula,
+                    total: roll.total,
+                    result: roll.result,
+                    dice: roll.dice.map(d => ({ faces: d.faces, results: d.results.map(x => x.result) })),
+                    messages: [msg.id] // for the capturePlan.after
+                  });
+                } catch (err) {
+                  finalize({ mode: "error", formula, error: err.message });
+                }
               }
+            },
+            cancel: {
+              label: "Cancel",
+              callback: () => finalize({ mode: "cancelled", formula })
             }
           },
-          cancel: {
-            label: "Cancel",
-            callback: () => finalize({ mode: "cancelled", formula })
-          }
-        },
-        default: "roll",
-        close: () => finalize({ mode: "dismissed", formula })
+          default: "roll",
+          close: () => finalize({ mode: "dismissed", formula })
+        });
+        dialog.render(true);
       });
-      dialog.render(true);
     });
   },
 
@@ -3132,52 +3225,56 @@ const handlers = {
    * Normalises the result into a canonical MCP shape.
    */
   request_roll_typed: async (params = {}) => {
-    const { actorId, type, identifier, dc, adv, fastForward = true } = params;
-    if (!actorId || !type || !identifier) throw new Error("`actorId`, `type`, and `identifier` are required");
+    return runAuditedMutation("request_roll_typed", params, capturePlans.roll_action, async () => {
+      const { actorId, type, identifier, dc, adv, fastForward = true } = params;
+      if (!actorId || !type || !identifier) throw new Error("`actorId`, `type`, and `identifier` are required");
 
-    const actor = game.actors.get(actorId) || game.actors.getName(actorId);
-    if (!actor) throw new Error(`Actor "${actorId}" not found`);
+      const actor = game.actors.get(actorId) || game.actors.getName(actorId);
+      if (!actor) throw new Error(`Actor "${actorId}" not found`);
 
-    const systemId = game.system.id;
-    const dispatcher = DISPATCHERS[systemId];
-    if (!dispatcher) throw new Error(`System "${systemId}" not supported for typed rolls. Use request_roll.`);
+      const systemId = game.system.id;
+      const dispatcher = DISPATCHERS[systemId];
+      if (!dispatcher) throw new Error(`System "${systemId}" not supported for typed rolls. Use request_roll.`);
 
-    let result;
-    if (type === "skill") result = await dispatcher.rollSkill(actor, { identifier, target: dc, adv });
-    else if (type === "ability") result = await dispatcher.rollAbility(actor, { identifier, target: dc, adv });
-    else if (type === "save") result = await dispatcher.rollSave(actor, { identifier, target: dc, adv });
-    else throw new Error(`Unknown roll type "${type}". Use "skill", "ability", or "save".`);
+      let result;
+      if (type === "skill") result = await dispatcher.rollSkill(actor, { identifier, target: dc, adv });
+      else if (type === "ability") result = await dispatcher.rollAbility(actor, { identifier, target: dc, adv });
+      else if (type === "save") result = await dispatcher.rollSave(actor, { identifier, target: dc, adv });
+      else throw new Error(`Unknown roll type "${type}". Use "skill", "ability", or "save".`);
 
-    return _normalizeRollResult(systemId, result, actor, dc);
+      return _normalizeRollResult(systemId, result, actor, dc);
+    });
   },
 
   /**
    * Triggers only the attack roll part of an item's workflow.
    */
   request_attack_roll: async (params = {}) => {
-    const { actorId, itemId, fastForward = true, adv } = params;
-    if (!actorId || !itemId) throw new Error("`actorId` and `itemId` are required");
+    return runAuditedMutation("request_attack_roll", params, capturePlans.roll_action, async () => {
+      const { actorId, itemId, fastForward = true, adv } = params;
+      if (!actorId || !itemId) throw new Error("`actorId` and `itemId` are required");
 
-    const actor = game.actors.get(actorId) || game.actors.getName(actorId);
-    if (!actor) throw new Error(`Actor "${actorId}" not found`);
+      const actor = game.actors.get(actorId) || game.actors.getName(actorId);
+      if (!actor) throw new Error(`Actor "${actorId}" not found`);
 
-    const item = actor.items.get(itemId) || actor.items.getName(itemId);
-    if (!item) throw new Error(`Item "${itemId}" not found on actor "${actor.name}"`);
+      const item = actor.items.get(itemId) || actor.items.getName(itemId);
+      if (!item) throw new Error(`Item "${itemId}" not found on actor "${actor.name}"`);
 
-    const systemId = game.system.id;
-    const dispatcher = DISPATCHERS[systemId];
-    if (!dispatcher || !dispatcher.rollAttack) throw new Error(`System "${systemId}" not supported for attack rolls.`);
+      const systemId = game.system.id;
+      const dispatcher = DISPATCHERS[systemId];
+      if (!dispatcher || !dispatcher.rollAttack) throw new Error(`System "${systemId}" not supported for attack rolls.`);
 
-    const { roll } = await dispatcher.rollAttack(actor, item, { adv });
-    
-    // Try to get target AC from current targets
-    let targetAC = null;
-    const target = game.user.targets.first();
-    if (target?.actor) {
-      targetAC = target.actor.system.attributes?.ac?.value ?? target.actor.system.ac?.value;
-    }
+      const { roll } = await dispatcher.rollAttack(actor, item, { adv });
+      
+      // Try to get target AC from current targets
+      let targetAC = null;
+      const target = game.user.targets.first();
+      if (target?.actor) {
+        targetAC = target.actor.system.attributes?.ac?.value ?? target.actor.system.ac?.value;
+      }
 
-    return _normalizeAttackResult(systemId, roll, targetAC);
+      return _normalizeAttackResult(systemId, roll, targetAC);
+    });
   },
 
   /**
@@ -3187,39 +3284,41 @@ const handlers = {
    * which posted a duplicate chat card.
    */
   request_damage_roll: async (params = {}) => {
-    const { actorId, itemId, isCritical } = params;
-    if (!actorId || !itemId) throw new Error("`actorId` and `itemId` are required");
+    return runAuditedMutation("request_damage_roll", params, capturePlans.roll_action, async () => {
+      const { actorId, itemId, isCritical } = params;
+      if (!actorId || !itemId) throw new Error("`actorId` and `itemId` are required");
 
-    const actor = game.actors.get(actorId) || game.actors.getName(actorId);
-    if (!actor) throw new Error(`Actor "${actorId}" not found`);
+      const actor = game.actors.get(actorId) || game.actors.getName(actorId);
+      if (!actor) throw new Error(`Actor "${actorId}" not found`);
 
-    const item = actor.items.get(itemId) || actor.items.getName(itemId);
-    if (!item) throw new Error(`Item "${itemId}" not found on actor "${actor.name}"`);
+      const item = actor.items.get(itemId) || actor.items.getName(itemId);
+      if (!item) throw new Error(`Item "${itemId}" not found on actor "${actor.name}"`);
 
-    const systemId = game.system.id;
-    const dispatcher = DISPATCHERS[systemId];
-    if (!dispatcher || !dispatcher.rollDamage) throw new Error(`System "${systemId}" not supported for damage rolls.`);
+      const systemId = game.system.id;
+      const dispatcher = DISPATCHERS[systemId];
+      if (!dispatcher || !dispatcher.rollDamage) throw new Error(`System "${systemId}" not supported for damage rolls.`);
 
-    let roll;
-    if (systemId === "dnd5e") {
-      const activity = item.system.activities?.find?.(a => a.type === "attack")
-        ?? item.system.activities?.contents?.find(a => a.type === "attack");
-      if (!activity) throw new Error(`No attack activity found on item "${item.name}"`);
-      roll = await dispatcher.rollDamage(activity, { isCritical });
-    } else if (systemId === "pf2e") {
-      const strike = dispatcher.getStrike(actor, item.id);
-      roll = await dispatcher.rollDamage(strike, { isCritical });
-    } else if (systemId === "shadowdark") {
-      // New shadowdark dispatcher needs item + crit flag (for the NPC-attack
-      // direct-formula path) rather than the legacy itemUuid shape.
-      roll = await dispatcher.rollDamage(actor, { item, isCritical });
-    } else if (systemId === "vagabond") {
-      roll = await dispatcher.rollDamage(item, { isCritical, actor });
-    } else {
-      throw new Error(`System "${systemId}" not supported for damage rolls.`);
-    }
+      let roll;
+      if (systemId === "dnd5e") {
+        const activity = item.system.activities?.find?.(a => a.type === "attack")
+          ?? item.system.activities?.contents?.find(a => a.type === "attack");
+        if (!activity) throw new Error(`No attack activity found on item "${item.name}"`);
+        roll = await dispatcher.rollDamage(activity, { isCritical });
+      } else if (systemId === "pf2e") {
+        const strike = dispatcher.getStrike(actor, item.id);
+        roll = await dispatcher.rollDamage(strike, { isCritical });
+      } else if (systemId === "shadowdark") {
+        // New shadowdark dispatcher needs item + crit flag (for the NPC-attack
+        // direct-formula path) rather than the legacy itemUuid shape.
+        roll = await dispatcher.rollDamage(actor, { item, isCritical });
+      } else if (systemId === "vagabond") {
+        roll = await dispatcher.rollDamage(item, { isCritical, actor });
+      } else {
+        throw new Error(`System "${systemId}" not supported for damage rolls.`);
+      }
 
-    return _normalizeDamageResult(systemId, roll, isCritical);
+      return _normalizeDamageResult(systemId, roll, isCritical);
+    });
   },
 
   /**
@@ -3229,75 +3328,77 @@ const handlers = {
    * so per-system crit inheritance works.
    */
   request_item_use: async (params = {}) => {
-    const { actorId, itemId, targetIds, activityId, adv } = params;
-    if (!actorId || !itemId) throw new Error("`actorId` and `itemId` are required");
+    return runAuditedMutation("request_item_use", params, capturePlans.roll_action, async () => {
+      const { actorId, itemId, targetIds, activityId, adv } = params;
+      if (!actorId || !itemId) throw new Error("`actorId` and `itemId` are required");
 
-    const actor = game.actors.get(actorId) || game.actors.getName(actorId);
-    if (!actor) throw new Error(`Actor "${actorId}" not found`);
+      const actor = game.actors.get(actorId) || game.actors.getName(actorId);
+      if (!actor) throw new Error(`Actor "${actorId}" not found`);
 
-    const item = actor.items.get(itemId) || actor.items.getName(itemId);
-    if (!item) throw new Error(`Item "${itemId}" not found on actor "${actor.name}"`);
+      const item = actor.items.get(itemId) || actor.items.getName(itemId);
+      if (!item) throw new Error(`Item "${itemId}" not found on actor "${actor.name}"`);
 
-    const systemId = game.system.id;
-    const dispatcher = DISPATCHERS[systemId];
-    if (!dispatcher) throw new Error(`System "${systemId}" not supported for item use.`);
+      const systemId = game.system.id;
+      const dispatcher = DISPATCHERS[systemId];
+      if (!dispatcher) throw new Error(`System "${systemId}" not supported for item use.`);
 
-    // Resolve a target AC for hit-check (prefer first explicit targetId, else
-    // current Foundry target). Non-d20 systems may not have AC at all.
-    let targetAC = null;
-    const firstTargetRef = Array.isArray(targetIds) && targetIds.length > 0 ? targetIds[0] : null;
-    let primaryTarget = firstTargetRef
-      ? (game.actors.get(firstTargetRef) || game.actors.getName(firstTargetRef) || canvas.tokens.get(firstTargetRef)?.actor)
-      : game.user.targets.first()?.actor;
-    if (primaryTarget) {
-      targetAC = primaryTarget.system.attributes?.ac?.value ?? primaryTarget.system.ac?.value ?? null;
-    }
-
-    const results = { itemId: item.id };
-
-    // 1. Attack
-    const attackData = await dispatcher.rollAttack(actor, item, { activityId, adv });
-    const rawAttackRoll = Array.isArray(attackData.roll) ? attackData.roll[0] : attackData.roll;
-    results.attack = _normalizeAttackResult(systemId, attackData.roll, targetAC);
-
-    // 2. Damage (if hit)
-    if (results.attack.hit) {
-      let damageRoll;
-      const isCrit = results.attack.isCritical || results.attack.degreeOfSuccess === 3;
-
-      if (systemId === "dnd5e") {
-        // Thread the attack roll into damage so the activity inherits crit.
-        damageRoll = await dispatcher.rollDamage(attackData.activity, { isCritical: isCrit, attackRoll: rawAttackRoll });
-      } else if (systemId === "pf2e") {
-        damageRoll = await dispatcher.rollDamage(attackData.strike, { isCritical: isCrit });
-      } else if (systemId === "shadowdark") {
-        damageRoll = await dispatcher.rollDamage(actor, { item, isCritical: isCrit, isNpc: attackData.isNpc });
-      } else if (systemId === "vagabond") {
-        damageRoll = await dispatcher.rollDamage(item, { isCritical: isCrit, actor });
+      // Resolve a target AC for hit-check (prefer first explicit targetId, else
+      // current Foundry target). Non-d20 systems may not have AC at all.
+      let targetAC = null;
+      const firstTargetRef = Array.isArray(targetIds) && targetIds.length > 0 ? targetIds[0] : null;
+      let primaryTarget = firstTargetRef
+        ? (game.actors.get(firstTargetRef) || game.actors.getName(firstTargetRef) || canvas.tokens.get(firstTargetRef)?.actor)
+        : game.user.targets.first()?.actor;
+      if (primaryTarget) {
+        targetAC = primaryTarget.system.attributes?.ac?.value ?? primaryTarget.system.ac?.value ?? null;
       }
 
-      results.damage = _normalizeDamageResult(systemId, damageRoll, isCrit);
+      const results = { itemId: item.id };
 
-      // 3. Apply (if targetIds provided)
-      if (Array.isArray(targetIds) && targetIds.length > 0) {
-        results.applied = [];
-        for (const tid of targetIds) {
-          const tactor = game.actors.get(tid) || game.actors.getName(tid) || canvas.tokens.get(tid)?.actor;
-          if (!tactor) continue;
-          const hpBefore = tactor.system.attributes?.hp?.value ?? tactor.system.hp?.value ?? null;
-          const applyRes = await dispatcher.applyDamage(tactor, { amount: results.damage.total });
-          const hpAfter  = tactor.system.attributes?.hp?.value ?? tactor.system.hp?.value ?? null;
-          const computedDelta = (hpBefore != null && hpAfter != null) ? (hpBefore - hpAfter) : null;
-          results.applied.push({
-            targetId: tid,
-            delta: applyRes?.delta ?? computedDelta ?? results.damage.total,
-            newHP: applyRes?.newHP ?? hpAfter
-          });
+      // 1. Attack
+      const attackData = await dispatcher.rollAttack(actor, item, { activityId, adv });
+      const rawAttackRoll = Array.isArray(attackData.roll) ? attackData.roll[0] : attackData.roll;
+      results.attack = _normalizeAttackResult(systemId, attackData.roll, targetAC);
+
+      // 2. Damage (if hit)
+      if (results.attack.hit) {
+        let damageRoll;
+        const isCrit = results.attack.isCritical || results.attack.degreeOfSuccess === 3;
+
+        if (systemId === "dnd5e") {
+          // Thread the attack roll into damage so the activity inherits crit.
+          damageRoll = await dispatcher.rollDamage(attackData.activity, { isCritical: isCrit, attackRoll: rawAttackRoll });
+        } else if (systemId === "pf2e") {
+          damageRoll = await dispatcher.rollDamage(attackData.strike, { isCritical: isCrit });
+        } else if (systemId === "shadowdark") {
+          damageRoll = await dispatcher.rollDamage(actor, { item, isCritical: isCrit, isNpc: attackData.isNpc });
+        } else if (systemId === "vagabond") {
+          damageRoll = await dispatcher.rollDamage(item, { isCritical: isCrit, actor });
+        }
+
+        results.damage = _normalizeDamageResult(systemId, damageRoll, isCrit);
+
+        // 3. Apply (if targetIds provided)
+        if (Array.isArray(targetIds) && targetIds.length > 0) {
+          results.applied = [];
+          for (const tid of targetIds) {
+            const tactor = game.actors.get(tid) || game.actors.getName(tid) || canvas.tokens.get(tid)?.actor;
+            if (!tactor) continue;
+            const hpBefore = tactor.system.attributes?.hp?.value ?? tactor.system.hp?.value ?? null;
+            const applyRes = await dispatcher.applyDamage(tactor, { amount: results.damage.total });
+            const hpAfter  = tactor.system.attributes?.hp?.value ?? tactor.system.hp?.value ?? null;
+            const computedDelta = (hpBefore != null && hpAfter != null) ? (hpBefore - hpAfter) : null;
+            results.applied.push({
+              targetId: tid,
+              delta: applyRes?.delta ?? computedDelta ?? results.damage.total,
+              newHP: applyRes?.newHP ?? hpAfter
+            });
+          }
         }
       }
-    }
 
-    return results;
+      return results;
+    });
   },
 
   /**
@@ -3306,39 +3407,60 @@ const handlers = {
    * actual reduction (after IWR/resistance/temp HP), not the requested amount.
    */
   apply_damage: async (params = {}) => {
-    const { damages } = params;
-    if (!Array.isArray(damages)) throw new Error("`damages` must be an array of per-target damage objects");
+    const capturePlan = {
+      before: async (p) => {
+        const out = [];
+        for (const d of p.damages) {
+          const actor = game.actors.get(d.targetId) || game.actors.getName(d.targetId) || canvas.tokens.get(d.targetId)?.actor;
+          if (actor) out.push(actor.toObject());
+        }
+        return out;
+      },
+      after: async (p) => {
+        const out = [];
+        for (const d of p.damages) {
+          const actor = game.actors.get(d.targetId) || game.actors.getName(d.targetId) || canvas.tokens.get(d.targetId)?.actor;
+          if (actor) out.push(actor.toObject());
+        }
+        return out;
+      }
+    };
 
-    const systemId = game.system.id;
-    const dispatcher = DISPATCHERS[systemId];
-    if (!dispatcher || !dispatcher.applyDamage) throw new Error(`System "${systemId}" does not support apply_damage.`);
+    return runAuditedMutation("apply_damage", params, capturePlan, async () => {
+      const { damages } = params;
+      if (!Array.isArray(damages)) throw new Error("`damages` must be an array of per-target damage objects");
 
-    const readHP = (a) => a.system.attributes?.hp?.value ?? a.system.hp?.value ?? a.system.health?.value ?? null;
+      const systemId = game.system.id;
+      const dispatcher = DISPATCHERS[systemId];
+      if (!dispatcher || !dispatcher.applyDamage) throw new Error(`System "${systemId}" does not support apply_damage.`);
 
-    const appliedResults = [];
-    for (const d of damages) {
-      const { targetId, amount, type, multiplier = 1 } = d;
-      const actor = game.actors.get(targetId) || game.actors.getName(targetId) || canvas.tokens.get(targetId)?.actor;
-      if (!actor) {
-        console.warn(`apply_damage: Target "${targetId}" not found`);
-        appliedResults.push({ targetId, error: "target not found" });
-        continue;
+      const readHP = (a) => a.system.attributes?.hp?.value ?? a.system.hp?.value ?? a.system.health?.value ?? null;
+
+      const appliedResults = [];
+      for (const d of damages) {
+        const { targetId, amount, type, multiplier = 1 } = d;
+        const actor = game.actors.get(targetId) || game.actors.getName(targetId) || canvas.tokens.get(targetId)?.actor;
+        if (!actor) {
+          console.warn(`apply_damage: Target "${targetId}" not found`);
+          appliedResults.push({ targetId, error: "target not found" });
+          continue;
+        }
+
+        const hpBefore = readHP(actor);
+        const res = await dispatcher.applyDamage(actor, { amount, type, multiplier });
+        const hpAfter  = readHP(actor);
+        const computedDelta = (hpBefore != null && hpAfter != null) ? (hpBefore - hpAfter) : null;
+
+        appliedResults.push({
+          targetId,
+          delta:           res?.delta ?? computedDelta ?? (amount * multiplier),
+          newHP:           res?.newHP ?? hpAfter,
+          finalMultiplier: multiplier
+        });
       }
 
-      const hpBefore = readHP(actor);
-      const res = await dispatcher.applyDamage(actor, { amount, type, multiplier });
-      const hpAfter  = readHP(actor);
-      const computedDelta = (hpBefore != null && hpAfter != null) ? (hpBefore - hpAfter) : null;
-
-      appliedResults.push({
-        targetId,
-        delta:           res?.delta ?? computedDelta ?? (amount * multiplier),
-        newHP:           res?.newHP ?? hpAfter,
-        finalMultiplier: multiplier
-      });
-    }
-
-    return { applied: appliedResults };
+      return { applied: appliedResults };
+    });
   },
 
   // -------------------------------------------------------------------------
@@ -3496,58 +3618,60 @@ const handlers = {
    * the given coordinates with the configured fields.
    */
   place_measured_template: async (params = {}) => {
-    const {
-      type = "circle",        // "circle" | "cone" | "rect" | "ray"
-      x, y,
-      distance,               // grid distance (units)
-      direction,              // degrees, for cone/ray
-      angle,                  // degrees, for cone width
-      width,                  // for ray
-      fillColor,              // hex string
-      texture,                // image path
-      flags,                  // module flags (merge-deep)
-      sceneId,
-      hidden = false
-    } = params;
+    return runAuditedMutation("place_measured_template", params, capturePlans.scene, async () => {
+      const {
+        type = "circle",        // "circle" | "cone" | "rect" | "ray"
+        x, y,
+        distance,               // grid distance (units)
+        direction,              // degrees, for cone/ray
+        angle,                  // degrees, for cone width
+        width,                  // for ray
+        fillColor,              // hex string
+        texture,                // image path
+        flags,                  // module flags (merge-deep)
+        sceneId,
+        hidden = false
+      } = params;
 
-    if (x == null || y == null) throw new Error("`x` and `y` (pixel coordinates) are required");
-    if (distance == null) throw new Error("`distance` (in grid units) is required");
+      if (x == null || y == null) throw new Error("`x` and `y` (pixel coordinates) are required");
+      if (distance == null) throw new Error("`distance` (in grid units) is required");
 
-    const scene = sceneId ? game.scenes.get(sceneId) : game.scenes.active;
-    if (!scene) throw new Error(sceneId ? `Scene "${sceneId}" not found` : "No active scene");
+      const scene = sceneId ? game.scenes.get(sceneId) : game.scenes.active;
+      if (!scene) throw new Error(sceneId ? `Scene "${sceneId}" not found` : "No active scene");
 
-    const validTypes = ["circle", "cone", "rect", "ray"];
-    if (!validTypes.includes(type)) throw new Error(`Invalid type "${type}". Allowed: ${validTypes.join(", ")}`);
+      const validTypes = ["circle", "cone", "rect", "ray"];
+      if (!validTypes.includes(type)) throw new Error(`Invalid type "${type}". Allowed: ${validTypes.join(", ")}`);
 
-    const data = {
-      t: type,
-      user: game.user.id,
-      x, y,
-      distance,
-      direction: direction ?? 0,
-      angle:     angle ?? (type === "cone" ? 53 : 0),
-      width:     width ?? 0,
-      fillColor: fillColor ?? game.user.color ?? "#FF0000",
-      hidden: !!hidden
-    };
-    if (texture) data.texture = texture;
-    if (flags && typeof flags === "object") data.flags = flags;
+      const data = {
+        t: type,
+        user: game.user.id,
+        x, y,
+        distance,
+        direction: direction ?? 0,
+        angle:     angle ?? (type === "cone" ? 53 : 0),
+        width:     width ?? 0,
+        fillColor: fillColor ?? game.user.color ?? "#FF0000",
+        hidden: !!hidden
+      };
+      if (texture) data.texture = texture;
+      if (flags && typeof flags === "object") data.flags = flags;
 
-    const [created] = await scene.createEmbeddedDocuments("MeasuredTemplate", [data]);
-    if (!created) throw new Error("MeasuredTemplate.create returned no document");
+      const [created] = await scene.createEmbeddedDocuments("MeasuredTemplate", [data]);
+      if (!created) throw new Error("MeasuredTemplate.create returned no document");
 
-    return {
-      id: created.id,
-      sceneId: scene.id,
-      type: created.t,
-      x: created.x,
-      y: created.y,
-      distance: created.distance,
-      direction: created.direction,
-      angle: created.angle,
-      width: created.width,
-      hidden: created.hidden
-    };
+      return {
+        id: created.id,
+        sceneId: scene.id,
+        type: created.t,
+        x: created.x,
+        y: created.y,
+        distance: created.distance,
+        direction: created.direction,
+        angle: created.angle,
+        width: created.width,
+        hidden: created.hidden
+      };
+    });
   },
 
   /**
@@ -3647,19 +3771,21 @@ const handlers = {
    * is a v14-native EmbeddedCollection. Returns the created level.
    */
   add_scene_level: async (params = {}) => {
-    const { sceneId, name, bottom, top } = params;
-    if (!sceneId || !name) throw new Error("`sceneId` and `name` are required");
-    if (typeof bottom !== "number" || typeof top !== "number") {
-      throw new Error("`bottom` and `top` (numeric elevation in feet) are required");
-    }
-    const scene = game.scenes.get(sceneId);
-    if (!scene) throw new Error(`Scene "${sceneId}" not found`);
+    return runAuditedMutation("add_scene_level", params, capturePlans.scene, async () => {
+      const { sceneId, name, bottom, top } = params;
+      if (!sceneId || !name) throw new Error("`sceneId` and `name` are required");
+      if (typeof bottom !== "number" || typeof top !== "number") {
+        throw new Error("`bottom` and `top` (numeric elevation in feet) are required");
+      }
+      const scene = game.scenes.get(sceneId);
+      if (!scene) throw new Error(`Scene "${sceneId}" not found`);
 
-    const [level] = await scene.createEmbeddedDocuments("Level", [{
-      name, elevation: { bottom, top }
-    }]);
-    if (!level) throw new Error("Level.create returned no document");
-    return { id: level.id, name: level.name, elevation: level.elevation };
+      const [level] = await scene.createEmbeddedDocuments("Level", [{
+        name, elevation: { bottom, top }
+      }]);
+      if (!level) throw new Error("Level.create returned no document");
+      return { id: level.id, name: level.name, elevation: level.elevation };
+    });
   },
 
   /**
@@ -3667,30 +3793,32 @@ const handlers = {
    * either `bottom` or `top` (or both); whatever's omitted is preserved.
    */
   update_scene_level: async (params = {}) => {
-    const { sceneId, levelId } = params;
-    if (!sceneId || !levelId) throw new Error("`sceneId` and `levelId` are required");
-    const scene = game.scenes.get(sceneId);
-    if (!scene) throw new Error(`Scene "${sceneId}" not found`);
+    return runAuditedMutation("update_scene_level", params, capturePlans.scene, async () => {
+      const { sceneId, levelId } = params;
+      if (!sceneId || !levelId) throw new Error("`sceneId` and `levelId` are required");
+      const scene = game.scenes.get(sceneId);
+      if (!scene) throw new Error(`Scene "${sceneId}" not found`);
 
-    const current = scene.levels?.get(levelId);
-    if (!current) throw new Error(`Level "${levelId}" not found on scene "${scene.name}"`);
+      const current = scene.levels?.get(levelId);
+      if (!current) throw new Error(`Level "${levelId}" not found on scene "${scene.name}"`);
 
-    const update = { _id: levelId };
-    const fieldsUpdated = [];
-    if (typeof params.name === "string") { update.name = params.name; fieldsUpdated.push("name"); }
-    if (typeof params.bottom === "number" || typeof params.top === "number") {
-      update.elevation = {
-        bottom: typeof params.bottom === "number" ? params.bottom : (current.elevation?.bottom ?? 0),
-        top:    typeof params.top    === "number" ? params.top    : (current.elevation?.top    ?? 20),
-      };
-      fieldsUpdated.push("elevation");
-    }
-    if (fieldsUpdated.length === 0) {
-      throw new Error("Provide at least one of `name`, `bottom`, `top`");
-    }
+      const update = { _id: levelId };
+      const fieldsUpdated = [];
+      if (typeof params.name === "string") { update.name = params.name; fieldsUpdated.push("name"); }
+      if (typeof params.bottom === "number" || typeof params.top === "number") {
+        update.elevation = {
+          bottom: typeof params.bottom === "number" ? params.bottom : (current.elevation?.bottom ?? 0),
+          top:    typeof params.top    === "number" ? params.top    : (current.elevation?.top    ?? 20),
+        };
+        fieldsUpdated.push("elevation");
+      }
+      if (fieldsUpdated.length === 0) {
+        throw new Error("Provide at least one of `name`, `bottom`, `top`");
+      }
 
-    const [level] = await scene.updateEmbeddedDocuments("Level", [update]);
-    return { id: level.id, name: level.name, elevation: level.elevation, fieldsUpdated };
+      const [level] = await scene.updateEmbeddedDocuments("Level", [update]);
+      return { id: level.id, name: level.name, elevation: level.elevation, fieldsUpdated };
+    });
   },
 
   /**
@@ -3698,20 +3826,22 @@ const handlers = {
    * remaining level — single-level scenes need at least one floor.
    */
   remove_scene_level: async (params = {}) => {
-    const { sceneId, levelId } = params;
-    if (!sceneId || !levelId) throw new Error("`sceneId` and `levelId` are required");
-    const scene = game.scenes.get(sceneId);
-    if (!scene) throw new Error(`Scene "${sceneId}" not found`);
+    return runAuditedMutation("remove_scene_level", params, capturePlans.scene, async () => {
+      const { sceneId, levelId } = params;
+      if (!sceneId || !levelId) throw new Error("`sceneId` and `levelId` are required");
+      const scene = game.scenes.get(sceneId);
+      if (!scene) throw new Error(`Scene "${sceneId}" not found`);
 
-    if ((scene.levels?.size ?? 0) <= 1) {
-      throw new Error("Refusing to delete the only remaining level — a scene must have at least one.");
-    }
-    const level = scene.levels.get(levelId);
-    if (!level) throw new Error(`Level "${levelId}" not found on scene "${scene.name}"`);
+      if ((scene.levels?.size ?? 0) <= 1) {
+        throw new Error("Refusing to delete the only remaining level — a scene must have at least one.");
+      }
+      const level = scene.levels.get(levelId);
+      if (!level) throw new Error(`Level "${levelId}" not found on scene "${scene.name}"`);
 
-    const meta = { id: level.id, name: level.name, elevation: level.elevation };
-    await scene.deleteEmbeddedDocuments("Level", [levelId]);
-    return { ...meta, deleted: true };
+      const meta = { id: level.id, name: level.name, elevation: level.elevation };
+      await scene.deleteEmbeddedDocuments("Level", [levelId]);
+      return { ...meta, deleted: true };
+    });
   },
 
   /**
@@ -3721,30 +3851,32 @@ const handlers = {
    * RegionBehavior schema (e.g. {type: "executeScript", system: {source}}).
    */
   create_region: async (params = {}) => {
-    const { sceneId, name, shapes, behaviors, levels, color, visibility, locked, elevation, ownership } = params;
-    if (!sceneId || !name) throw new Error("`sceneId` and `name` are required");
-    if (!Array.isArray(shapes) || shapes.length === 0) throw new Error("`shapes` must be a non-empty array");
-    const scene = game.scenes.get(sceneId);
-    if (!scene) throw new Error(`Scene "${sceneId}" not found`);
+    return runAuditedMutation("create_region", params, capturePlans.scene, async () => {
+      const { sceneId, name, shapes, behaviors, levels, color, visibility, locked, elevation, ownership } = params;
+      if (!sceneId || !name) throw new Error("`sceneId` and `name` are required");
+      if (!Array.isArray(shapes) || shapes.length === 0) throw new Error("`shapes` must be a non-empty array");
+      const scene = game.scenes.get(sceneId);
+      if (!scene) throw new Error(`Scene "${sceneId}" not found`);
 
-    const data = { name, shapes };
-    if (Array.isArray(behaviors) && behaviors.length) data.behaviors = behaviors;
-    if (Array.isArray(levels) && levels.length)       data.levels = levels;
-    if (color)                                        data.color = color;
-    if (visibility !== undefined)                     data.visibility = visibility;
-    if (locked !== undefined)                         data.locked = locked;
-    if (elevation && typeof elevation === "object")   data.elevation = elevation;
-    if (ownership && typeof ownership === "object")   data.ownership = ownership;
+      const data = { name, shapes };
+      if (Array.isArray(behaviors) && behaviors.length) data.behaviors = behaviors;
+      if (Array.isArray(levels) && levels.length)       data.levels = levels;
+      if (color)                                        data.color = color;
+      if (visibility !== undefined)                     data.visibility = visibility;
+      if (locked !== undefined)                         data.locked = locked;
+      if (elevation && typeof elevation === "object")   data.elevation = elevation;
+      if (ownership && typeof ownership === "object")   data.ownership = ownership;
 
-    const [region] = await scene.createEmbeddedDocuments("Region", [data]);
-    if (!region) throw new Error("Region.create returned no document");
-    return {
-      id: region.id,
-      name: region.name,
-      shapeCount: region.shapes?.length ?? 0,
-      behaviorCount: region.behaviors?.size ?? 0,
-      levels: Array.from(region.levels ?? [])
-    };
+      const [region] = await scene.createEmbeddedDocuments("Region", [data]);
+      if (!region) throw new Error("Region.create returned no document");
+      return {
+        id: region.id,
+        name: region.name,
+        shapeCount: region.shapes?.length ?? 0,
+        behaviorCount: region.behaviors?.size ?? 0,
+        levels: Array.from(region.levels ?? [])
+      };
+    });
   },
 
   /**
@@ -3753,35 +3885,39 @@ const handlers = {
    * supported, e.g. `"elevation.bottom": 10`).
    */
   update_region: async (params = {}) => {
-    const { sceneId, regionId, patch } = params;
-    if (!sceneId || !regionId) throw new Error("`sceneId` and `regionId` are required");
-    if (!patch || typeof patch !== "object") throw new Error("`patch` is required and must be an object");
-    const scene = game.scenes.get(sceneId);
-    if (!scene) throw new Error(`Scene "${sceneId}" not found`);
+    return runAuditedMutation("update_region", params, capturePlans.scene, async () => {
+      const { sceneId, regionId, patch } = params;
+      if (!sceneId || !regionId) throw new Error("`sceneId` and `regionId` are required");
+      if (!patch || typeof patch !== "object") throw new Error("`patch` is required and must be an object");
+      const scene = game.scenes.get(sceneId);
+      if (!scene) throw new Error(`Scene "${sceneId}" not found`);
 
-    const exists = scene.regions?.get(regionId);
-    if (!exists) throw new Error(`Region "${regionId}" not found on scene "${scene.name}"`);
+      const exists = scene.regions?.get(regionId);
+      if (!exists) throw new Error(`Region "${regionId}" not found on scene "${scene.name}"`);
 
-    const [region] = await scene.updateEmbeddedDocuments("Region", [{ _id: regionId, ...patch }]);
-    return {
-      id: region.id,
-      name: region.name,
-      fieldsUpdated: Object.keys(patch)
-    };
+      const [region] = await scene.updateEmbeddedDocuments("Region", [{ _id: regionId, ...patch }]);
+      return {
+        id: region.id,
+        name: region.name,
+        fieldsUpdated: Object.keys(patch)
+      };
+    });
   },
 
   /** Delete a region by id. Permanent. */
   delete_region: async (params = {}) => {
-    const { sceneId, regionId } = params;
-    if (!sceneId || !regionId) throw new Error("`sceneId` and `regionId` are required");
-    const scene = game.scenes.get(sceneId);
-    if (!scene) throw new Error(`Scene "${sceneId}" not found`);
-    const region = scene.regions?.get(regionId);
-    if (!region) throw new Error(`Region "${regionId}" not found on scene "${scene.name}"`);
+    return runAuditedMutation("delete_region", params, capturePlans.scene, async () => {
+      const { sceneId, regionId } = params;
+      if (!sceneId || !regionId) throw new Error("`sceneId` and `regionId` are required");
+      const scene = game.scenes.get(sceneId);
+      if (!scene) throw new Error(`Scene "${sceneId}" not found`);
+      const region = scene.regions?.get(regionId);
+      if (!region) throw new Error(`Region "${regionId}" not found on scene "${scene.name}"`);
 
-    const meta = { id: region.id, name: region.name };
-    await scene.deleteEmbeddedDocuments("Region", [regionId]);
-    return { ...meta, deleted: true };
+      const meta = { id: region.id, name: region.name };
+      await scene.deleteEmbeddedDocuments("Region", [regionId]);
+      return { ...meta, deleted: true };
+    });
   },
 
   /**
@@ -3815,32 +3951,34 @@ const handlers = {
    * pick which floor loads by default) without recreating the scene.
    */
   update_scene: async (params = {}) => {
-    const { sceneId } = params;
-    if (!sceneId) throw new Error("`sceneId` is required");
-    const scene = game.scenes.get(sceneId);
-    if (!scene) throw new Error(`Scene "${sceneId}" not found`);
+    return runAuditedMutation("update_scene", params, capturePlans.scene, async () => {
+      const { sceneId } = params;
+      if (!sceneId) throw new Error("`sceneId` is required");
+      const scene = game.scenes.get(sceneId);
+      if (!scene) throw new Error(`Scene "${sceneId}" not found`);
 
-    const ALLOWED = ["name", "padding", "backgroundColor", "background",
-                     "grid", "navigation", "sort", "navName", "fogExploration",
-                     "initial"];
-    const update = {};
-    const fieldsUpdated = [];
-    for (const k of ALLOWED) {
-      if (k in params) {
-        update[k] = params[k];
-        fieldsUpdated.push(k);
+      const ALLOWED = ["name", "padding", "backgroundColor", "background",
+                       "grid", "navigation", "sort", "navName", "fogExploration",
+                       "initial"];
+      const update = {};
+      const fieldsUpdated = [];
+      for (const k of ALLOWED) {
+        if (k in params) {
+          update[k] = params[k];
+          fieldsUpdated.push(k);
+        }
       }
-    }
-    if (fieldsUpdated.length === 0) {
-      throw new Error(`Provide at least one of: ${ALLOWED.join(", ")}`);
-    }
+      if (fieldsUpdated.length === 0) {
+        throw new Error(`Provide at least one of: ${ALLOWED.join(", ")}`);
+      }
 
-    await scene.update(update);
-    return {
-      id: scene.id,
-      name: scene.name,
-      fieldsUpdated
-    };
+      await scene.update(update);
+      return {
+        id: scene.id,
+        name: scene.name,
+        fieldsUpdated
+      };
+    });
   },
 
   /**
@@ -3849,14 +3987,16 @@ const handlers = {
    * id, name, and active state.
    */
   activate_scene: async (params = {}) => {
-    const { sceneId, sceneName } = params;
-    if (!sceneId && !sceneName) throw new Error("Either `sceneId` or `sceneName` is required");
-    const scene = sceneId
-      ? game.scenes.get(sceneId)
-      : game.scenes.getName(sceneName);
-    if (!scene) throw new Error(`Scene ${sceneId ? `id "${sceneId}"` : `name "${sceneName}"`} not found`);
-    await scene.activate();
-    return { id: scene.id, name: scene.name, active: scene.active };
+    return runAuditedMutation("activate_scene", params, capturePlans.scene, async () => {
+      const { sceneId, sceneName } = params;
+      if (!sceneId && !sceneName) throw new Error("Either `sceneId` or `sceneName` is required");
+      const scene = sceneId
+        ? game.scenes.get(sceneId)
+        : game.scenes.getName(sceneName);
+      if (!scene) throw new Error(`Scene ${sceneId ? `id "${sceneId}"` : `name "${sceneName}"`} not found`);
+      await scene.activate();
+      return { id: scene.id, name: scene.name, active: scene.active };
+    });
   },
 
   /**
@@ -3881,32 +4021,34 @@ const handlers = {
    * a second call for the common "make it and look at it" workflow.
    */
   create_scene: async (params = {}) => {
-    const data = {
-      name: params.name ?? "New Scene",
-      width:   params.width   ?? 4000,
-      height:  params.height  ?? 3000,
-      padding: params.padding ?? 0.25,
-      grid: {
-        type:  params.gridType  ?? CONST.GRID_TYPES.SQUARE,
-        size:  params.gridSize  ?? 100,
-        alpha: params.gridAlpha ?? 0.2,
-      },
-      backgroundColor: params.backgroundColor ?? "#1c1c1c",
-    };
-    if (params.background) data.background = { src: params.background };
-    if (params.folderId)   data.folder     = params.folderId;
+    return runAuditedMutation("create_scene", params, capturePlans.scene, async () => {
+      const data = {
+        name: params.name ?? "New Scene",
+        width:   params.width   ?? 4000,
+        height:  params.height  ?? 3000,
+        padding: params.padding ?? 0.25,
+        grid: {
+          type:  params.gridType  ?? CONST.GRID_TYPES.SQUARE,
+          size:  params.gridSize  ?? 100,
+          alpha: params.gridAlpha ?? 0.2,
+        },
+        backgroundColor: params.backgroundColor ?? "#1c1c1c",
+      };
+      if (params.background) data.background = { src: params.background };
+      if (params.folderId)   data.folder     = params.folderId;
 
-    const scene = await Scene.create(data);
-    if (!scene) throw new Error("Scene.create returned null");
-    if (params.activate !== false) await scene.activate();
-    return {
-      id: scene.id,
-      name: scene.name,
-      active: scene.active,
-      width: scene.width,
-      height: scene.height,
-      folder: scene.folder?.id ?? null
-    };
+      const scene = await Scene.create(data);
+      if (!scene) throw new Error("Scene.create returned null");
+      if (params.activate !== false) await scene.activate();
+      return {
+        id: scene.id,
+        name: scene.name,
+        active: scene.active,
+        width: scene.width,
+        height: scene.height,
+        folder: scene.folder?.id ?? null
+      };
+    });
   },
 
   /**
@@ -3915,23 +4057,25 @@ const handlers = {
    * really meant to wipe the open canvas.
    */
   delete_scene: async (params = {}) => {
-    const { sceneId, sceneName, force = false } = params;
-    if (!sceneId && !sceneName) throw new Error("Either `sceneId` or `sceneName` is required");
-    const scene = sceneId
-      ? game.scenes.get(sceneId)
-      : game.scenes.getName(sceneName);
-    if (!scene) throw new Error(`Scene ${sceneId ? `id "${sceneId}"` : `name "${sceneName}"`} not found`);
+    return runAuditedMutation("delete_scene", params, capturePlans.scene, async () => {
+      const { sceneId, sceneName, force = false } = params;
+      if (!sceneId && !sceneName) throw new Error("Either `sceneId` or `sceneName` is required");
+      const scene = sceneId
+        ? game.scenes.get(sceneId)
+        : game.scenes.getName(sceneName);
+      if (!scene) throw new Error(`Scene ${sceneId ? `id "${sceneId}"` : `name "${sceneName}"`} not found`);
 
-    if (scene.active && !force) {
-      throw new Error(
-        `Scene "${scene.name}" (${scene.id}) is currently active. ` +
-        `Pass force: true to delete it anyway.`
-      );
-    }
+      if (scene.active && !force) {
+        throw new Error(
+          `Scene "${scene.name}" (${scene.id}) is currently active. ` +
+          `Pass force: true to delete it anyway.`
+        );
+      }
 
-    const meta = { id: scene.id, name: scene.name, wasActive: scene.active };
-    await scene.delete();
-    return { ...meta, deleted: true };
+      const meta = { id: scene.id, name: scene.name, wasActive: scene.active };
+      await scene.delete();
+      return { ...meta, deleted: true };
+    });
   },
 
   /**

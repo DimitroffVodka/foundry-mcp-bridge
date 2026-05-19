@@ -10,7 +10,7 @@
  *     For Type B tools we manually inject `targetUser` into the schema.
  */
 import { z }                                from "zod";
-import { registerRoutedTool, registerRawTool, TARGET_USER_DESC } from "./_helpers.js";
+import { registerRoutedTool, registerRawTool, TARGET_USER_DESC, AUDIT_DESC } from "./_helpers.js";
 import { callFoundryImage }                 from "../lib/foundry-rpc.js";
 
 export function registerCanvasTools(mcp) {
@@ -36,6 +36,7 @@ export function registerCanvasTools(mcp) {
       x:       z.number().describe("Target x coordinate (scene pixels)."),
       y:       z.number().describe("Target y coordinate (scene pixels)."),
       animate: z.boolean().optional().describe("Animate movement. Default true."),
+      audit:   z.boolean().optional().describe(AUDIT_DESC),
     });
 
   registerRoutedTool(mcp, "move_token_pathed",
@@ -51,6 +52,7 @@ export function registerCanvasTools(mcp) {
       canOpenDoors: z.boolean().optional().describe("Open closed doors along the path. Default false."),
       elevation:    z.number().optional().describe("Applied to the final waypoint."),
       rotation:     z.number().optional().describe("Applied to the final waypoint."),
+      audit:        z.boolean().optional().describe("Return an audit block with before/after diffs and undo instructions."),
     });
 
   registerRoutedTool(mcp, "update_token",
@@ -59,11 +61,15 @@ export function registerCanvasTools(mcp) {
     {
       token:   z.string().describe("Token id, token name, or linked actor name."),
       updates: z.record(z.string(), z.any()).describe("Object of fields to update (whitelisted keys only)."),
+      audit:   z.boolean().optional().describe(AUDIT_DESC),
     });
 
   registerRoutedTool(mcp, "delete_tokens",
     "Delete one or more tokens from the active scene.",
-    { tokens: z.array(z.string()).describe("Token ids, names, or linked actor names.") });
+    {
+      tokens: z.array(z.string()).describe("Token ids, names, or linked actor names."),
+      audit:  z.boolean().optional().describe(AUDIT_DESC),
+    });
 
   // --- Conditions / targeting ---
   registerRoutedTool(mcp, "toggle_token_condition",
@@ -73,6 +79,7 @@ export function registerCanvasTools(mcp) {
       token:     z.string().describe("Token id, token name, or linked actor name."),
       condition: z.string().describe("Condition id (e.g. 'prone', 'poisoned')."),
       active:    z.boolean().optional().describe("Force on (true) or off (false). Omit to toggle."),
+      audit:     z.boolean().optional().describe(AUDIT_DESC),
     });
 
   registerRoutedTool(mcp, "get_available_conditions",
@@ -85,6 +92,7 @@ export function registerCanvasTools(mcp) {
     "Call this before `click`-ing an attack so the system computes hits against real defenses.",
     {
       tokens: z.array(z.string()).describe("Token names, actor names, or token document ids on the current scene. Empty array clears targets."),
+      audit:  z.boolean().optional().describe(AUDIT_DESC),
     });
 
   // --- Multi-level scene (v0.11.2) ---

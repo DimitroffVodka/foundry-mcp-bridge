@@ -11,7 +11,7 @@
  * browser context with that user's permissions.
  */
 import { z }                                     from "zod";
-import { registerRoutedTool, registerRawTool, TARGET_USER_DESC } from "./_helpers.js";
+import { registerRoutedTool, registerRawTool, TARGET_USER_DESC, AUDIT_DESC } from "./_helpers.js";
 import { callFoundry }                           from "../lib/foundry-rpc.js";
 import { ALLOW_WRITE }                           from "../lib/config.js";
 
@@ -35,6 +35,7 @@ export function registerWorldAuthoringTools(mcp) {
       color:        z.string().optional().describe(
         "Optional hex color (e.g. '#3a5'). Foundry shows this on the folder header."
       ),
+      audit:        z.boolean().optional().describe(AUDIT_DESC),
     });
 
   // --- Actor from compendium ---
@@ -51,6 +52,7 @@ export function registerWorldAuthoringTools(mcp) {
         "Target folder by exact name. Auto-created as an Actor folder if it doesn't exist."
       ),
       nameOverride: z.string().optional().describe("Rename the imported actor."),
+      audit:        z.boolean().optional().describe(AUDIT_DESC),
     });
 
   // --- Actor from scratch ---
@@ -84,6 +86,7 @@ export function registerWorldAuthoringTools(mcp) {
       folderName:     z.string().optional().describe(
         "Target folder by exact name. Auto-created as an Actor folder if it doesn't exist."
       ),
+      audit:          z.boolean().optional().describe(AUDIT_DESC),
     });
 
   // --- Add items to existing actor ---
@@ -98,6 +101,7 @@ export function registerWorldAuthoringTools(mcp) {
         "Items to add. Each entry is { pack, documentId, nameOverride? } "
         + "(compendium ref) OR { name, type, system?, ... } (inline)."
       ),
+      audit:   z.boolean().optional().describe(AUDIT_DESC),
     });
 
   // --- Journal entry ---
@@ -123,6 +127,7 @@ export function registerWorldAuthoringTools(mcp) {
       folderName: z.string().optional().describe(
         "Target folder by exact name. Auto-created as a JournalEntry folder if missing."
       ),
+      audit:      z.boolean().optional().describe(AUDIT_DESC),
     });
 
   // --- Update journal page ---
@@ -137,6 +142,7 @@ export function registerWorldAuthoringTools(mcp) {
       name:          z.string().optional().describe("Replace the page name."),
       content:       z.string().optional().describe("Replace the page body (HTML or Markdown per the page's format)."),
       appendContent: z.string().optional().describe("Append to the existing page body. Ignored if `content` is also provided."),
+      audit:         z.boolean().optional().describe(AUDIT_DESC),
     });
 
   // --- Delete: folder ---
@@ -150,6 +156,7 @@ export function registerWorldAuthoringTools(mcp) {
       deleteContents: z.boolean().optional().describe(
         "If true, delete all contained documents and subfolders too. Default false (orphan)."
       ),
+      audit:          z.boolean().optional().describe(AUDIT_DESC),
     });
 
   // --- Delete: actor ---
@@ -159,6 +166,7 @@ export function registerWorldAuthoringTools(mcp) {
     + "or `snapshot_actor` first.",
     {
       actorId: z.string().describe("Actor document id."),
+      audit:   z.boolean().optional().describe(AUDIT_DESC),
     });
 
   // --- Update: actor ---
@@ -177,6 +185,7 @@ export function registerWorldAuthoringTools(mcp) {
       prototypeToken: z.record(z.string(), z.any()).optional().describe(
         "Merge into the prototype token (affects future tokens placed from this actor)."
       ),
+      audit:          z.boolean().optional().describe(AUDIT_DESC),
     });
 
   // --- Items on actor: delete ---
@@ -186,6 +195,7 @@ export function registerWorldAuthoringTools(mcp) {
     {
       actorId: z.string().describe("Actor document id."),
       itemIds: z.array(z.string()).describe("Embedded item ids to remove."),
+      audit:   z.boolean().optional().describe(AUDIT_DESC),
     });
 
   // --- Items on actor: update ---
@@ -199,6 +209,7 @@ export function registerWorldAuthoringTools(mcp) {
       data:    z.record(z.string(), z.any()).describe(
         "Fields to merge into the item. Foundry's diff-update semantics apply."
       ),
+      audit:   z.boolean().optional().describe(AUDIT_DESC),
     });
 
   // --- Delete: journal entry ---
@@ -207,6 +218,7 @@ export function registerWorldAuthoringTools(mcp) {
     + "undo doesn't cover document deletion.",
     {
       journalId: z.string().describe("Journal entry document id."),
+      audit:     z.boolean().optional().describe(AUDIT_DESC),
     });
 
   // --- Delete: journal page ---
@@ -215,6 +227,7 @@ export function registerWorldAuthoringTools(mcp) {
     {
       journalId: z.string().describe("Parent journal entry id."),
       pageId:    z.string().describe("Page id to delete."),
+      audit:     z.boolean().optional().describe(AUDIT_DESC),
     });
 
   // --- Add page to journal entry ---
@@ -232,6 +245,7 @@ export function registerWorldAuthoringTools(mcp) {
         }).optional(),
         src:     z.string().optional().describe("URL/path for image/pdf/video pages."),
       }).describe("Page to add."),
+      audit:     z.boolean().optional().describe(AUDIT_DESC),
     });
 
   // --- Scene: place a token ---
@@ -251,6 +265,7 @@ export function registerWorldAuthoringTools(mcp) {
       hidden:   z.boolean().optional().describe("Spawn the token hidden to non-GMs."),
       name:     z.string().optional().describe("Override the token name (defaults to the actor name)."),
       rotation: z.number().optional().describe("Token rotation in degrees."),
+      audit:    z.boolean().optional().describe(AUDIT_DESC),
     });
 
   // --- Ownership: set ---
@@ -270,6 +285,7 @@ export function registerWorldAuthoringTools(mcp) {
         "Map of user → level. Use `default` for non-listed users. "
         + "Example: { default: \"NONE\", \"Bob\": \"OWNER\" }."
       ),
+      audit:     z.boolean().optional().describe(AUDIT_DESC),
     });
 
   // --- Ownership: read ---
@@ -290,13 +306,16 @@ export function registerWorldAuthoringTools(mcp) {
       rollInitiative: z.union([z.boolean(), z.enum(["all", "npc"])]).optional().describe(
         "If true or 'all', roll for every combatant. If 'npc', only roll for NPC combatants. Default: no auto-roll."
       ),
+      audit:          z.boolean().optional().describe(AUDIT_DESC),
     });
 
   // --- Combat: end ---
   registerRoutedTool(mcp, "end_combat",
     "End the active combat encounter (deletes it). The token roster on the "
     + "scene is unaffected — only the combat tracker entry is removed.",
-    {});
+    {
+      audit: z.boolean().optional().describe(AUDIT_DESC),
+    });
 
   // --- Combat: advance ---
   registerRoutedTool(mcp, "advance_combat",
@@ -304,6 +323,7 @@ export function registerWorldAuthoringTools(mcp) {
     + "automatically when wrapping past the last combatant.",
     {
       direction: z.enum(["next", "previous"]).optional().describe("Default 'next'."),
+      audit:     z.boolean().optional().describe(AUDIT_DESC),
     });
 
   // --- Chat: send message ---
@@ -323,6 +343,7 @@ export function registerWorldAuthoringTools(mcp) {
         z.enum(["OOC", "IC", "EMOTE", "WHISPER", "ROLL", "OTHER"]),
         z.number().int()
       ]).optional().describe("Message type. Default 'OOC' (out-of-character)."),
+      audit:     z.boolean().optional().describe(AUDIT_DESC),
     });
 
   // --- Roll request (raw — needs longer timeout than the 15s default) ---
@@ -338,6 +359,7 @@ export function registerWorldAuthoringTools(mcp) {
       timeoutSeconds: z.number().int().min(5).max(300).optional().describe("Dialog wait time. Default 60s, max 300s."),
       autoAccept:     z.boolean().optional().describe("Skip the dialog and roll immediately. Default false."),
       targetUser:     z.string().optional().describe(TARGET_USER_DESC),
+      audit:          z.boolean().optional().describe(AUDIT_DESC),
     },
     async (params) => {
       const { targetUser, timeoutSeconds = 60, ...rest } = params;
@@ -355,6 +377,7 @@ export function registerWorldAuthoringTools(mcp) {
     identifier: z.string().describe("System-specific ID for the roll (e.g. 'ath' for 5e Athletics, 'athletics' for PF2e, 'str' for Shadowdark stat)."),
     dc:         z.number().optional().describe("Target DC for success evaluation."),
     adv:        z.enum(["normal", "advantage", "disadvantage"]).optional().describe("Force advantage state (dnd5e + shadowdark only; ignored elsewhere)."),
+    audit:      z.boolean().optional().describe(AUDIT_DESC),
   };
 
   // Canonical name from v0.12.1 onward.
@@ -381,6 +404,7 @@ export function registerWorldAuthoringTools(mcp) {
       itemId:     z.string().describe("Item/weapon ID or name."),
       activityId: z.string().optional().describe("D&D 5e specific activity ID (when an item has multiple attack activities)."),
       adv:        z.enum(["normal", "advantage", "disadvantage"]).optional().describe("Force advantage state (system-dependent)."),
+      audit:      z.boolean().optional().describe(AUDIT_DESC),
     });
 
   // --- Damage roll (v0.10.0) ---
@@ -391,6 +415,7 @@ export function registerWorldAuthoringTools(mcp) {
       actorId:    z.string().describe("Actor ID or name."),
       itemId:     z.string().describe("Item/weapon ID or name."),
       isCritical: z.boolean().optional().describe("Force critical damage (doubles dice on d20 systems)."),
+      audit:      z.boolean().optional().describe(AUDIT_DESC),
     });
 
   // --- Item use: Full Flow (v0.10.0) ---
@@ -405,6 +430,7 @@ export function registerWorldAuthoringTools(mcp) {
       activityId: z.string().optional().describe("D&D 5e specific activity ID."),
       adv:        z.enum(["normal", "advantage", "disadvantage"]).optional().describe("Force advantage state."),
       targetUser: z.string().optional().describe(TARGET_USER_DESC),
+      audit:      z.boolean().optional().describe(AUDIT_DESC),
     },
     async (params) => {
       const { targetUser, targetIds = [], ...rest } = params;
@@ -423,6 +449,7 @@ export function registerWorldAuthoringTools(mcp) {
         type:       z.string().optional().describe("Damage type (e.g. 'fire')."),
         multiplier: z.number().optional().describe("Multiplier (e.g. 0.5 for half)."),
       })).describe("Per-target damage descriptors."),
+      audit:  z.boolean().optional().describe(AUDIT_DESC),
     });
 
   // --- Scene levels CRUD (v0.12.0) ---
@@ -435,6 +462,7 @@ export function registerWorldAuthoringTools(mcp) {
       name:    z.string().describe("Level name (e.g. 'Ground', 'Upper', 'Basement')."),
       bottom:  z.number().describe("Lower bound of the level's elevation range (in feet)."),
       top:     z.number().describe("Upper bound of the level's elevation range (in feet)."),
+      audit:   z.boolean().optional().describe(AUDIT_DESC),
     });
 
   registerRoutedTool(mcp, "update_scene_level",
@@ -446,6 +474,7 @@ export function registerWorldAuthoringTools(mcp) {
       name:    z.string().optional().describe("New level name."),
       bottom:  z.number().optional().describe("New lower elevation bound."),
       top:     z.number().optional().describe("New upper elevation bound."),
+      audit:   z.boolean().optional().describe(AUDIT_DESC),
     });
 
   registerRoutedTool(mcp, "remove_scene_level",
@@ -454,6 +483,7 @@ export function registerWorldAuthoringTools(mcp) {
     {
       sceneId: z.string().describe("Target scene id."),
       levelId: z.string().describe("Level document id to delete."),
+      audit:   z.boolean().optional().describe(AUDIT_DESC),
     });
 
   // --- Region CRUD (v0.12.0) ---
@@ -478,6 +508,7 @@ export function registerWorldAuthoringTools(mcp) {
       locked:     z.boolean().optional().describe("Lock the region from interactive selection."),
       elevation:  z.record(z.string(), z.any()).optional().describe("Override elevation range {bottom, top}."),
       ownership:  z.record(z.string(), z.any()).optional().describe("Per-user ownership map."),
+      audit:      z.boolean().optional().describe(AUDIT_DESC),
     });
 
   registerRoutedTool(mcp, "update_region",
@@ -491,6 +522,7 @@ export function registerWorldAuthoringTools(mcp) {
       patch:    z.record(z.string(), z.any()).describe(
         "Fields to merge into the region (e.g. {visibility: 0, locked: false})."
       ),
+      audit:    z.boolean().optional().describe(AUDIT_DESC),
     });
 
   registerRoutedTool(mcp, "delete_region",
@@ -498,6 +530,7 @@ export function registerWorldAuthoringTools(mcp) {
     {
       sceneId:  z.string().describe("Target scene id."),
       regionId: z.string().describe("Region document id to delete."),
+      audit:    z.boolean().optional().describe(AUDIT_DESC),
     });
 
   // --- Update scene (v0.12.1) ---
@@ -519,6 +552,7 @@ export function registerWorldAuthoringTools(mcp) {
       navName:         z.string().optional().describe("Short name shown in the navigation bar."),
       fogExploration:  z.boolean().optional().describe("Whether fog of war exploration is tracked."),
       initial:         z.record(z.string(), z.any()).optional().describe("Initial view config (e.g. {level: '<levelId>', x, y, scale})."),
+      audit:           z.boolean().optional().describe(AUDIT_DESC),
     });
 
   // --- Activate scene (v0.11.2) ---
@@ -529,6 +563,7 @@ export function registerWorldAuthoringTools(mcp) {
     {
       sceneId:   z.string().optional().describe("Scene document id (preferred — unambiguous)."),
       sceneName: z.string().optional().describe("Scene name (exact match). Used only if `sceneId` is omitted."),
+      audit:     z.boolean().optional().describe(AUDIT_DESC),
     });
 
   // --- List scenes (v0.11.2) ---
@@ -555,6 +590,7 @@ export function registerWorldAuthoringTools(mcp) {
       background:      z.string().optional().describe("Background image path/URL (sets scene.background.src)."),
       folderId:        z.string().optional().describe("Parent folder id (Scene type)."),
       activate:        z.boolean().optional().describe("Activate after creating. Default true."),
+      audit:           z.boolean().optional().describe(AUDIT_DESC),
     });
 
   // --- Delete scene (v0.11.2) ---
@@ -566,6 +602,7 @@ export function registerWorldAuthoringTools(mcp) {
       sceneId:   z.string().optional().describe("Scene document id to delete (preferred — unambiguous)."),
       sceneName: z.string().optional().describe("Scene name (exact match). Used only if `sceneId` is omitted."),
       force:     z.boolean().optional().describe("Set true to delete even if the scene is currently active. Default false."),
+      audit:     z.boolean().optional().describe(AUDIT_DESC),
     });
 
   // --- Place measured template (v0.11) ---
@@ -588,5 +625,6 @@ export function registerWorldAuthoringTools(mcp) {
       ),
       sceneId:   z.string().optional().describe("Target scene id. Default: active scene."),
       hidden:    z.boolean().optional().describe("Create hidden to non-GMs. Default false."),
+      audit:     z.boolean().optional().describe(AUDIT_DESC),
     });
 }

@@ -28,6 +28,9 @@ export const TARGET_USER_DESC =
   + 'run as that player. Use list_connected_bridges to see who is '
   + 'currently connected.';
 
+export const AUDIT_DESC =
+  'Return an audit block with before/after diffs and undo instructions.';
+
 /**
  * Register a tool that proxies to the Foundry-side bridge handler with
  * automatic `targetUser` routing. Adds `targetUser?: string` to the
