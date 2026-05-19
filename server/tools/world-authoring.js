@@ -348,17 +348,30 @@ export function registerWorldAuthoringTools(mcp) {
     });
 
   // --- Typed roll (v0.10.0) ---
+  // Shared schema for request_check / request_roll_typed.
+  const _checkSchema = {
+    actorId:    z.string().describe("Actor ID or name."),
+    type:       z.enum(["skill", "ability", "save"]).describe("Category of the roll."),
+    identifier: z.string().describe("System-specific ID for the roll (e.g. 'ath' for 5e Athletics, 'athletics' for PF2e, 'str' for Shadowdark stat)."),
+    dc:         z.number().optional().describe("Target DC for success evaluation."),
+    adv:        z.enum(["normal", "advantage", "disadvantage"]).optional().describe("Force advantage state (dnd5e + shadowdark only; ignored elsewhere)."),
+  };
+
+  // Canonical name from v0.12.1 onward.
+  registerRoutedTool(mcp, "request_check",
+    "Triggers a system-native skill, ability, or save check on an actor. "
+    + "Handles system-specific modifiers and formatting. Dialogs always "
+    + "suppressed. Replaces `request_roll_typed` (kept as alias).",
+    _checkSchema,
+    "request_roll_typed"  // bridge-side handler name unchanged
+  );
+
+  // Legacy alias — same behavior, older name. Will be removed in a future
+  // release; LLMs should prefer `request_check`.
   registerRoutedTool(mcp, "request_roll_typed",
-    "Triggers a system-native roll (Skill, Ability, or Save) on an actor. "
-    + "This handles system-specific modifiers and formatting. Dialogs are "
-    + "always suppressed — no fastForward knob is needed.",
-    {
-      actorId:    z.string().describe("Actor ID or name."),
-      type:       z.enum(["skill", "ability", "save"]).describe("Category of the roll."),
-      identifier: z.string().describe("System-specific ID for the roll (e.g. 'ath' for 5e Athletics, 'athletics' for PF2e, 'str' for Shadowdark stat)."),
-      dc:         z.number().optional().describe("Target DC for success evaluation."),
-      adv:        z.enum(["normal", "advantage", "disadvantage"]).optional().describe("Force advantage state (dnd5e + shadowdark only; ignored elsewhere)."),
-    });
+    "DEPRECATED — use `request_check` instead. Same behavior; kept as an "
+    + "alias for backward compatibility. Will be removed in v0.13.",
+    _checkSchema);
 
   // --- Attack roll (v0.10.0) ---
   registerRoutedTool(mcp, "request_attack_roll",
@@ -485,6 +498,27 @@ export function registerWorldAuthoringTools(mcp) {
     {
       sceneId:  z.string().describe("Target scene id."),
       regionId: z.string().describe("Region document id to delete."),
+    });
+
+  // --- Update scene (v0.12.1) ---
+  registerRoutedTool(mcp, "update_scene",
+    "Patch fields on an existing scene. Whitelisted: name, padding, "
+    + "backgroundColor, background (image src etc.), grid, navigation, sort, "
+    + "navName, fogExploration, initial (which level/view loads on activate). "
+    + "Use this to rename, swap background, fix the initial-load level "
+    + "without recreating the scene.",
+    {
+      sceneId:         z.string().describe("Target scene id."),
+      name:            z.string().optional(),
+      padding:         z.number().optional(),
+      backgroundColor: z.string().optional(),
+      background:      z.record(z.string(), z.any()).optional().describe("Background data object (e.g. {src: 'path/to/image.webp'})."),
+      grid:            z.record(z.string(), z.any()).optional().describe("Grid object (e.g. {size: 100, type: 1, alpha: 0.2})."),
+      navigation:      z.boolean().optional().describe("Whether the scene appears in the navigation bar."),
+      sort:            z.number().int().optional().describe("Navigation sort order."),
+      navName:         z.string().optional().describe("Short name shown in the navigation bar."),
+      fogExploration:  z.boolean().optional().describe("Whether fog of war exploration is tracked."),
+      initial:         z.record(z.string(), z.any()).optional().describe("Initial view config (e.g. {level: '<levelId>', x, y, scale})."),
     });
 
   // --- Activate scene (v0.11.2) ---

@@ -137,6 +137,13 @@ export function registerWorldTools(mcp) {
       type:    z.enum(["Token", "MeasuredTemplate", "Region", "Wall", "AmbientLight", "AmbientSound", "Drawing", "Note", "Tile"])
                 .optional().describe("Document type. Default 'Token'."),
       sceneId: z.string().optional().describe("Target scene id. Default: active scene."),
+      select:  z.array(z.string()).optional().describe(
+        "Optional projection — array of dotted field paths to keep (e.g. "
+        + "['_id', 'name', 'behaviors.type']). Drastically reduces payload size "
+        + "when the caller only needs a few fields per item. Array paths map "
+        + "across elements: 'behaviors.type' on a region returns the array of "
+        + "each behavior's type."
+      ),
     });
 
   // --- Settings (v0.11) ---
@@ -180,7 +187,10 @@ export function registerWorldTools(mcp) {
     + "etc.). Args are passed positionally; result is JSON-serialised.",
     {
       moduleId: z.string().describe("Module ID (e.g. 'shadowdark-extras', 'mythic-gme-tools')."),
-      fn:       z.string().describe("Function name on `module.api`."),
+      fn:       z.string().optional().describe(
+        "Function name on `module.api`. **Omit to discover what's available** — "
+        + "returns the full list without calling anything."
+      ),
       args:     z.array(z.any()).optional().describe("Positional args. Default: []."),
     });
 }

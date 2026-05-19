@@ -3227,7 +3227,7 @@ const handlers = {
    * evaluate.
    */
   get_scene_placeables: (params = {}) => {
-    const { type = "Token", sceneId } = params;
+    const { type = "Token", sceneId, select } = params;
     const scene = sceneId ? game.scenes.get(sceneId) : game.scenes.active;
     if (!scene) throw new Error(sceneId ? `Scene "${sceneId}" not found` : "No active scene");
 
@@ -3249,8 +3249,33 @@ const handlers = {
     const collection = scene[key];
     if (!collection) return { sceneId: scene.id, type, count: 0, items: [] };
 
-    const items = collection.contents.map(doc => doc.toObject());
-    return { sceneId: scene.id, sceneName: scene.name, type, count: items.length, items };
+    let items = collection.contents.map(doc => doc.toObject());
+
+    // Optional projection — caller passes dotted paths like "behaviors.type".
+    // For arrays in the path, we map across each element. Drastically reduces
+    // payload size when the caller only needs a few fields per item.
+    if (Array.isArray(select) && select.length > 0) {
+      const _walk = (obj, path) => {
+        const parts = path.split(".");
+        let cur = obj;
+        for (const part of parts) {
+          if (cur == null) return undefined;
+          if (Array.isArray(cur)) {
+            cur = cur.map(el => (el == null ? undefined : el[part]));
+          } else {
+            cur = cur[part];
+          }
+        }
+        return cur;
+      };
+      items = items.map(it => {
+        const proj = {};
+        for (const path of select) proj[path] = _walk(it, path);
+        return proj;
+      });
+    }
+
+    return { sceneId: scene.id, sceneName: scene.name, type, count: items.length, items, ...(select ? { projected: select } : {}) };
   },
 
   /**
@@ -3654,6 +3679,44 @@ const handlers = {
   },
 
   /**
+   * Patch fields on an existing scene. Whitelisted top-level fields:
+   * name, padding, backgroundColor, background.src (image), grid.size,
+   * grid.type, grid.alpha, initial.level (which level loads on activate),
+   * navigation, sort, navName, fogExploration. Unknown fields are dropped.
+   *
+   * Use this to fix metadata after-the-fact (rename, change background,
+   * pick which floor loads by default) without recreating the scene.
+   */
+  update_scene: async (params = {}) => {
+    const { sceneId } = params;
+    if (!sceneId) throw new Error("`sceneId` is required");
+    const scene = game.scenes.get(sceneId);
+    if (!scene) throw new Error(`Scene "${sceneId}" not found`);
+
+    const ALLOWED = ["name", "padding", "backgroundColor", "background",
+                     "grid", "navigation", "sort", "navName", "fogExploration",
+                     "initial"];
+    const update = {};
+    const fieldsUpdated = [];
+    for (const k of ALLOWED) {
+      if (k in params) {
+        update[k] = params[k];
+        fieldsUpdated.push(k);
+      }
+    }
+    if (fieldsUpdated.length === 0) {
+      throw new Error(`Provide at least one of: ${ALLOWED.join(", ")}`);
+    }
+
+    await scene.update(update);
+    return {
+      id: scene.id,
+      name: scene.name,
+      fieldsUpdated
+    };
+  },
+
+  /**
    * Activate an existing scene by id or exact name. Used when you want to
    * switch to a different scene without recreating one. Returns the scene's
    * id, name, and active state.
@@ -3757,11 +3820,25 @@ const handlers = {
    */
   call_module_api: async (params = {}) => {
     const { moduleId, fn, args } = params;
-    if (!moduleId || !fn) throw new Error("`moduleId` and `fn` are required");
+    if (!moduleId) throw new Error("`moduleId` is required");
 
     const mod = game.modules.get(moduleId);
     if (!mod) throw new Error(`Module "${moduleId}" not installed`);
     if (!mod.api) throw new Error(`Module "${moduleId}" has no .api surface — module author hasn't exposed callable functions`);
+
+    // Discovery mode: omit `fn` to get the list of available functions
+    // without triggering a call. Mirrors the wrong-name-probe affordance.
+    if (!fn) {
+      const available = Object.keys(mod.api)
+        .filter(k => typeof mod.api[k] === "function")
+        .sort();
+      return {
+        moduleId,
+        mode: "discovery",
+        available,
+        count: available.length
+      };
+    }
 
     const target = mod.api[fn];
     if (typeof target !== "function") {
