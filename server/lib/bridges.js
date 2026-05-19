@@ -80,6 +80,25 @@ export function routeBridge(targetUser) {
 export function startBridgeServer() {
   const wss = new WebSocketServer({ port: WS_PORT, host: WS_HOST });
 
+  // Log success only after the port is actually bound. WebSocketServer's
+  // constructor returns synchronously but the bind is async — logging
+  // here would print "listening on..." even when the bind ultimately fails
+  // with EADDRINUSE. Wait for the real `listening` event instead, and
+  // surface bind errors clearly with actionable hints.
+  wss.on("listening", () => {
+    log(`WebSocket bridge listening on ws://${WS_HOST}:${WS_PORT}`);
+  });
+  wss.on("error", (err) => {
+    if (err?.code === "EADDRINUSE") {
+      log(`ERROR: WebSocket port ${WS_PORT} is already in use. Another foundry-mcp server is probably running. Kill it (netstat -ano | findstr :${WS_PORT} → taskkill /PID <pid> /F) and restart.`);
+    } else {
+      log(`ERROR: WebSocket server failed: ${err?.message || err}`);
+    }
+    // Re-throw so the process exits with a non-zero code rather than
+    // limping along with a half-initialized bridge.
+    throw err;
+  });
+
   wss.on("connection", (socket) => {
     log("Foundry bridge socket opened (awaiting hello)");
 
@@ -195,6 +214,5 @@ export function startBridgeServer() {
     });
   });
 
-  log(`WebSocket bridge listening on ws://${WS_HOST}:${WS_PORT}`);
   return wss;
 }
