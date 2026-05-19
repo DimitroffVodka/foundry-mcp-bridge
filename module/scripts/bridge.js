@@ -3826,12 +3826,33 @@ const handlers = {
     if (!mod) throw new Error(`Module "${moduleId}" not installed`);
     if (!mod.api) throw new Error(`Module "${moduleId}" has no .api surface — module author hasn't exposed callable functions`);
 
-    // Discovery mode: omit `fn` to get the list of available functions
+    // Walk the api tree and collect every function as a dotted path. Lets
+    // modules expose nested namespaces (e.g. shadowdark-extras' `internal.*`
+    // for security-quarantined helpers) without callers having to guess.
+    const _flatten = (obj, prefix = "") => {
+      const out = [];
+      for (const [k, v] of Object.entries(obj ?? {})) {
+        const path = prefix ? `${prefix}.${k}` : k;
+        if (typeof v === "function") out.push(path);
+        else if (v && typeof v === "object") out.push(..._flatten(v, path));
+      }
+      return out;
+    };
+
+    // Resolve a dotted path and return both the function and its parent
+    // (so we can preserve `this` binding for methods on nested namespaces).
+    const _resolveDotted = (root, path) => {
+      const parts = path.split(".");
+      const lastKey = parts.pop();
+      const parent = parts.reduce((acc, k) => acc?.[k], root);
+      if (parent == null || typeof parent !== "object") return { fn: undefined, parent: null };
+      return { fn: parent[lastKey], parent };
+    };
+
+    // Discovery mode: omit `fn` to get the full list of callable paths
     // without triggering a call. Mirrors the wrong-name-probe affordance.
     if (!fn) {
-      const available = Object.keys(mod.api)
-        .filter(k => typeof mod.api[k] === "function")
-        .sort();
+      const available = _flatten(mod.api).sort();
       return {
         moduleId,
         mode: "discovery",
@@ -3840,14 +3861,15 @@ const handlers = {
       };
     }
 
-    const target = mod.api[fn];
+    const { fn: target, parent } = _resolveDotted(mod.api, fn);
     if (typeof target !== "function") {
-      const available = Object.keys(mod.api).filter(k => typeof mod.api[k] === "function").sort();
+      const available = _flatten(mod.api).sort();
       throw new Error(`${moduleId}.api.${fn} is not a function. Available: ${available.join(", ") || "(none)"}`);
     }
 
     const callArgs = Array.isArray(args) ? args : [];
-    const raw = await target(...callArgs);
+    // Bind to the parent so nested helpers that rely on `this` still work.
+    const raw = await target.call(parent, ...callArgs);
     // Foundry documents have a toObject(); other values are JSON-cloned for
     // serialisation safety. null/undefined pass through cleanly.
     let result;
