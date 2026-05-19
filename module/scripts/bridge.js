@@ -223,6 +223,25 @@ function safeSerializeHookArg(val, depth = 0, maxDepth = 3) {
   if (t === "function") return `[Function ${val.name || "anon"}]`;
   if (depth >= maxDepth) return "[max depth]";
 
+  // Errors — extract non-enumerable own props explicitly. Plain
+  // JSON.stringify on an Error returns {} because name/message/stack are
+  // non-enumerable; Object.keys() doesn't see them. Without this branch,
+  // every "Handler error for X" log line bottoms out at "{}" and the
+  // useful debugging info is lost.
+  if (val instanceof Error) {
+    const out = {
+      _type:   "Error",
+      name:    val.name,
+      message: val.message,
+      stack:   val.stack
+    };
+    if (val.cause !== undefined) {
+      try { out.cause = safeSerializeHookArg(val.cause, depth + 1, maxDepth); }
+      catch { out.cause = "[unserializable]"; }
+    }
+    return out;
+  }
+
   // Foundry documents — summarise
   if (val?.documentName) {
     return {
@@ -974,6 +993,114 @@ function _normalizeDamageResult(systemId, rawRoll, isCritical) {
 // Request handlers — each returns serialisable data
 // ---------------------------------------------------------------------------
 const handlers = {
+
+  /**
+   * One-call situational awareness snapshot. Aggregates the read tools an
+   * LLM typically wants when answering "what's going on right now?":
+   * - game / system / world info
+   * - active scene + selected token + current targets
+   * - active combat state
+   * - recent console errors and recent chat
+   * - active modules summary
+   *
+   * Each section is tried independently; one failing piece (e.g. no scene
+   * loaded) doesn't break the whole snapshot — that section just carries
+   * an `_error` field. Reduces N round-trips during debugging.
+   */
+  get_debug_snapshot: () => {
+    const _try = (label, fn) => {
+      try { return fn(); }
+      catch (err) { return { _error: err?.message ?? String(err), _section: label }; }
+    };
+
+    const targets = [...(game.user.targets ?? [])];
+
+    return {
+      timestamp: new Date().toISOString(),
+      game: _try("game", () => ({
+        system: {
+          id:      game.system.id,
+          title:   game.system.title,
+          version: game.system.version
+        },
+        world: {
+          id:    game.world.id,
+          title: game.world.title
+        },
+        foundryVersion: game.version,
+        currentUser: {
+          id:     game.user.id,
+          name:   game.user.name,
+          isGM:   game.user.isGM,
+          role:   game.user.role
+        }
+      })),
+      scene: _try("scene", () => {
+        const scene = canvas.scene ?? game.scenes.active;
+        if (!scene) return null;
+        return {
+          id:    scene.id,
+          name:  scene.name,
+          width: scene.width,
+          height: scene.height,
+          tokenCount: scene.tokens?.size ?? 0,
+          activeLevelId: canvas.level?.id ?? null
+        };
+      }),
+      selectedToken: _try("selectedToken", () => {
+        const t = canvas.tokens?.controlled?.[0];
+        if (!t) return null;
+        return { id: t.id, name: t.name, actorId: t.actor?.id, x: t.x, y: t.y };
+      }),
+      targets: _try("targets", () => ({
+        count: targets.length,
+        ids:   targets.map(t => t.id),
+        names: targets.map(t => t.name)
+      })),
+      combat: _try("combat", () => {
+        const combat = game.combat;
+        if (!combat) return { active: false };
+        return {
+          active: true,
+          id: combat.id,
+          round: combat.round,
+          turn: combat.turn,
+          started: combat.started,
+          combatantCount: combat.combatants?.size ?? 0,
+          currentCombatant: combat.combatant ? {
+            id: combat.combatant.id,
+            name: combat.combatant.name,
+            initiative: combat.combatant.initiative
+          } : null
+        };
+      }),
+      recentConsoleErrors: _try("recentConsoleErrors", () =>
+        errorBuffer.slice(-10).map(e => ({
+          level: e.level,
+          timestamp: e.timestamp,
+          message: typeof e.message === "string" ? e.message.slice(0, 300) : "(non-string)"
+        }))
+      ),
+      recentChat: _try("recentChat", () => {
+        const msgs = game.messages?.contents?.slice(-10) ?? [];
+        return msgs.map(m => ({
+          id: m.id,
+          timestamp: m.timestamp,
+          speaker: m.speaker?.alias ?? null,
+          isRoll: m.isRoll,
+          contentPreview: String(m.content ?? "").slice(0, 120)
+        }));
+      }),
+      activeModules: _try("activeModules", () => {
+        const out = [];
+        for (const [id, mod] of game.modules.entries()) {
+          if (!mod.active) continue;
+          out.push({ id, title: mod.title, version: mod.version, hasApi: !!mod.api });
+        }
+        return { count: out.length, modules: out };
+      })
+    };
+  },
 
   /** Basic system & world info */
   get_game_info: () => {

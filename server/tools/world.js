@@ -168,6 +168,15 @@ export function registerWorldTools(mcp) {
       type:    z.string().optional().describe("Filter by item type (e.g. 'weapon', 'spell', 'class')."),
     });
 
+  // --- Debug snapshot (v0.12.3) ---
+  registerRoutedTool(mcp, "get_debug_snapshot",
+    "One-call situational awareness aggregator. Returns game/world/system "
+    + "info, active scene, selected token, current targets, combat state, "
+    + "recent console errors, recent chat, and the active module list. "
+    + "Use this as the default 'what's going on?' tool — replaces 8+ "
+    + "individual reads with one round trip during debugging.",
+    {});
+
   // --- Region behavior type discovery (v0.12.0) ---
   registerRoutedTool(mcp, "list_region_behavior_types",
     "Enumerate every registered RegionBehavior subtype and its schema "
