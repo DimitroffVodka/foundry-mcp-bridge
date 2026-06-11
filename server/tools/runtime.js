@@ -4,8 +4,28 @@
  * rather than persisted data.
  */
 import { z }                  from "zod";
-import { registerRoutedTool } from "./_helpers.js";
+import { registerRoutedTool, registerRawTool, TARGET_USER_DESC } from "./_helpers.js";
 import { ALLOW_EVAL }          from "../lib/config.js";
+import { callFoundry }         from "../lib/foundry-rpc.js";
+
+const MIN_EVALUATE_TIMEOUT_MS = 5_000;
+const MAX_EVALUATE_TIMEOUT_MS = 180_000;
+
+export function createEvaluateHandler(callFoundryImpl = callFoundry) {
+  return async ({ expression, background = false, targetUser, timeoutMs }) => {
+    const clampedTimeout = timeoutMs === undefined
+      ? undefined
+      : Math.min(Math.max(Math.trunc(timeoutMs), MIN_EVALUATE_TIMEOUT_MS), MAX_EVALUATE_TIMEOUT_MS);
+    return callFoundryImpl("evaluate", { expression, ...(background ? { background: true } : {}) }, targetUser, clampedTimeout);
+  };
+}
+
+export function createJobResultHandler(callFoundryImpl = callFoundry) {
+  return async ({ targetUser, waitMs = 0, ...params }) => {
+    const bridgeTimeoutMs = Math.max(15_000, Math.min(Math.max(Math.trunc(waitMs), 0), 10_000) + 5_000);
+    return callFoundryImpl("job_result", { ...params, waitMs }, targetUser, bridgeTimeoutMs);
+  };
+}
 
 export function registerRuntimeTools(mcp) {
   // --- Console errors ---
@@ -21,7 +41,7 @@ export function registerRuntimeTools(mcp) {
 
   // --- Evaluate (opt-in: requires FOUNDRY_MCP_ALLOW_EVAL=1) ---
   if (ALLOW_EVAL) {
-    registerRoutedTool(mcp, "evaluate",
+    registerRawTool(mcp, "evaluate",
       "Evaluate arbitrary JavaScript in the live Foundry VTT context. "
       + "Has access to `game`, `canvas`, and `ui` globals. "
       + "Write the body of an async function; `return` to send data back; "
@@ -36,11 +56,36 @@ export function registerRuntimeTools(mcp) {
       + "`Object.keys(obj).map(k => ({ k, t: typeof obj[k] }))`.\n"
       + "• Response includes `evalMs` so you can tell whether a slow call is "
       + "the bridge or your code.",
+       {
+         expression: z.string().describe(
+           "JS to evaluate (body of an async function with game/canvas/ui in scope)."
+         ),
+         timeoutMs: z.number().optional().describe(
+           "Server-side wait limit in milliseconds. Values are clamped to 5000-180000. "
+           + "Omit for the default 15000ms timeout."
+         ),
+         background: z.boolean().optional().describe(
+           "Start the evaluation as a background job and return a jobId immediately. Default false."
+         ),
+         targetUser: z.string().optional().describe(TARGET_USER_DESC),
+       },
+       createEvaluateHandler());
+
+    registerRawTool(mcp, "job_result",
+      "Poll or read a background evaluate job. Completed small results return inline; "
+      + "large results return bounded JSON chunks. Results remain available until TTL "
+      + "expiry or an explicit delete. Running JavaScript cannot be canceled safely.",
       {
-        expression: z.string().describe(
-          "JS to evaluate (body of an async function with game/canvas/ui in scope)."
+        jobId: z.string().describe("Job/result handle returned by evaluate."),
+        waitMs: z.number().int().min(0).max(10_000).optional().describe(
+          "Wait up to this many milliseconds for a running job before returning status. Default 0."
         ),
-      });
+        offset: z.number().int().min(0).optional().describe("Character offset for a large JSON result. Default 0."),
+        length: z.number().int().min(1).max(65_536).optional().describe("Maximum JSON characters to return. Default 65536."),
+        delete: z.boolean().optional().describe("Delete a settled job/result instead of reading it."),
+        targetUser: z.string().optional().describe(TARGET_USER_DESC),
+      },
+      createJobResultHandler());
   }
 
   // --- DOM interaction ---

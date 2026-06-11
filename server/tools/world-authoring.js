@@ -13,10 +13,22 @@
 import { z }                                     from "zod";
 import { registerRoutedTool, registerRawTool, TARGET_USER_DESC, AUDIT_DESC } from "./_helpers.js";
 import { callFoundry }                           from "../lib/foundry-rpc.js";
-import { ALLOW_WRITE }                           from "../lib/config.js";
+import { ALLOW_SELF_TEST, ALLOW_WRITE }          from "../lib/config.js";
 
 export function registerWorldAuthoringTools(mcp) {
   if (!ALLOW_WRITE) return;
+
+  if (ALLOW_SELF_TEST) {
+    registerRoutedTool(mcp, "self_test",
+      "Run a destructive schema-drift smoke test using uniquely flagged throwaway "
+      + "Actor, JournalEntry, RollTable, and Scene documents. Always attempts "
+      + "ID-based cleanup in finally and fails if anything remains.",
+      {
+        confirm: z.literal(true).describe(
+          "Required acknowledgement that this tool temporarily creates and deletes world documents."
+        ),
+      });
+  }
 
   // --- Folders ---
   registerRoutedTool(mcp, "create_folder",
@@ -536,21 +548,23 @@ export function registerWorldAuthoringTools(mcp) {
   // --- Update scene (v0.12.1) ---
   registerRoutedTool(mcp, "update_scene",
     "Patch fields on an existing scene. Whitelisted: name, padding, "
-    + "backgroundColor, background (image src etc.), grid, navigation, sort, "
-    + "navName, fogExploration, initial (which level/view loads on activate). "
-    + "Use this to rename, swap background, fix the initial-load level "
-    + "without recreating the scene.",
+    + "backgroundColor, background, foreground, levelFog, fog, grid, "
+    + "navigation, sort, navName, fogExploration, and initial. Foundry v14 "
+    + "Level-backed fields are translated automatically.",
     {
       sceneId:         z.string().describe("Target scene id."),
       name:            z.string().optional(),
       padding:         z.number().optional(),
       backgroundColor: z.string().optional(),
       background:      z.record(z.string(), z.any()).optional().describe("Background data object (e.g. {src: 'path/to/image.webp'})."),
+      foreground:      z.record(z.string(), z.any()).optional().describe("Foreground texture data; Level-backed on v14."),
+      levelFog:        z.record(z.string(), z.any()).optional().describe("Level fog texture data {src, tint}; v14 only."),
+      fog:             z.record(z.string(), z.any()).optional().describe("Scene fog config, e.g. {mode: 0|1|2, colors}."),
       grid:            z.record(z.string(), z.any()).optional().describe("Grid object (e.g. {size: 100, type: 1, alpha: 0.2})."),
       navigation:      z.boolean().optional().describe("Whether the scene appears in the navigation bar."),
       sort:            z.number().int().optional().describe("Navigation sort order."),
       navName:         z.string().optional().describe("Short name shown in the navigation bar."),
-      fogExploration:  z.boolean().optional().describe("Whether fog of war exploration is tracked."),
+      fogExploration:  z.boolean().optional().describe("Compatibility boolean. On v14 maps false→fog.mode 0 and true→fog.mode 1."),
       initial:         z.record(z.string(), z.any()).optional().describe("Initial view config (e.g. {level: '<levelId>', x, y, scale})."),
       audit:           z.boolean().optional().describe(AUDIT_DESC),
     });
@@ -587,7 +601,13 @@ export function registerWorldAuthoringTools(mcp) {
       gridSize:        z.number().int().optional().describe("Grid cell size in pixels. Default 100."),
       gridAlpha:       z.number().optional().describe("Grid line alpha (0.0–1.0). Default 0.2."),
       backgroundColor: z.string().optional().describe("Hex background color. Default '#1c1c1c'."),
-      background:      z.string().optional().describe("Background image path/URL (sets scene.background.src)."),
+      background:      z.union([z.string(), z.record(z.string(), z.any())]).optional().describe(
+        "Background image path or data object. On v14 background fields map to Level.background and transforms to Level.textures."
+      ),
+      foreground:      z.record(z.string(), z.any()).optional().describe("Foreground texture data; Level-backed on v14."),
+      levelFog:        z.record(z.string(), z.any()).optional().describe("Level fog texture data {src, tint}; v14 only."),
+      fog:             z.record(z.string(), z.any()).optional().describe("Scene fog config, e.g. {mode: 0|1|2, colors}."),
+      fogExploration:  z.boolean().optional().describe("Compatibility boolean for fog exploration."),
       folderId:        z.string().optional().describe("Parent folder id (Scene type)."),
       activate:        z.boolean().optional().describe("Activate after creating. Default true."),
       audit:           z.boolean().optional().describe(AUDIT_DESC),

@@ -14,11 +14,36 @@ import {
   safeSerializeHookArg,
   extractDocRef
 } from "../lib/audit.js";
+import { flushCanvasRender } from "./canvas-render.js";
+import { createRuntimeJobStore } from "./runtime-jobs.js";
+import {
+  applySceneLevelUpdate,
+  splitSceneCompatibilityFields
+} from "./scene-compat.js";
+import { runFoundrySelfTest } from "./self-test.js";
 
 const MODULE_ID = "foundry-mcp-live";
 const WS_URL = "ws://localhost:3001";
 const RECONNECT_DELAY = 5000;
 const MAX_ERRORS = 1000;
+const evaluationJobs = createRuntimeJobStore();
+
+async function _runEvaluation(expression) {
+  const t0 = performance.now();
+  try {
+    const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
+    const fn = new AsyncFunction("game", "canvas", "ui", expression);
+    const raw = await fn(game, canvas, ui);
+    const evalMs = +(performance.now() - t0).toFixed(2);
+    const result = (raw?.toObject)
+      ? raw.toObject()
+      : JSON.parse(JSON.stringify(raw ?? null));
+    return { result, evalMs };
+  } catch (err) {
+    const evalMs = +(performance.now() - t0).toFixed(2);
+    return { error: err.message, stack: err.stack, evalMs };
+  }
+}
 
 // ---------------------------------------------------------------------------
 // v14 body-class normalization
@@ -1438,6 +1463,7 @@ const handlers = {
     const renderer = canvas?.app?.renderer;
     const stage    = canvas?.stage;
     if (!renderer || !stage) return { error: "Canvas not ready" };
+    flushCanvasRender(canvas);
 
     const scale   = Math.min(Math.max(params.scale ?? 0.5, 0.1), 1);
     const quality = Math.min(Math.max(params.quality ?? 0.7, 0.1), 1);
@@ -1534,6 +1560,7 @@ const handlers = {
     const stage    = canvas?.stage;
     const scene    = canvas?.scene;
     if (!renderer || !stage || !scene) return { error: "Canvas not ready" };
+    flushCanvasRender(canvas);
 
     const overlay = _addGridOverlay(canvas);
     const screenW = renderer.screen.width;
@@ -2337,22 +2364,17 @@ const handlers = {
    */
   evaluate: async (params = {}) => {
     if (!params.expression) return { error: "No expression provided" };
-    const t0 = performance.now();
-    try {
-      const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
-      const fn = new AsyncFunction("game", "canvas", "ui", params.expression);
-      const raw = await fn(game, canvas, ui);
-      const evalMs = +(performance.now() - t0).toFixed(2);
-
-      // Attempt to serialise — toObject() if it's a Foundry document
-      const result = (raw?.toObject)
-        ? raw.toObject()
-        : JSON.parse(JSON.stringify(raw ?? null));
-      return { result, evalMs };
-    } catch (err) {
-      const evalMs = +(performance.now() - t0).toFixed(2);
-      return { error: err.message, stack: err.stack, evalMs };
+    if (params.background) {
+      return evaluationJobs.start(() => _runEvaluation(params.expression));
     }
+    return evaluationJobs.formatImmediate(await _runEvaluation(params.expression));
+  },
+
+  job_result: async (params = {}) => evaluationJobs.read(params),
+
+  self_test: async (params = {}) => {
+    if (params.confirm !== true) throw new Error("`confirm: true` is required");
+    return runFoundrySelfTest();
   },
 
   // -------------------------------------------------------------------------
@@ -3942,10 +3964,8 @@ const handlers = {
   },
 
   /**
-   * Patch fields on an existing scene. Whitelisted top-level fields:
-   * name, padding, backgroundColor, background.src (image), grid.size,
-   * grid.type, grid.alpha, initial.level (which level loads on activate),
-   * navigation, sort, navName, fogExploration. Unknown fields are dropped.
+   * Patch fields on an existing scene. Foundry v14 background, foreground,
+   * and level-fog data is translated onto the scene's default Level document.
    *
    * Use this to fix metadata after-the-fact (rename, change background,
    * pick which floor loads by default) without recreating the scene.
@@ -3957,26 +3977,28 @@ const handlers = {
       const scene = game.scenes.get(sceneId);
       if (!scene) throw new Error(`Scene "${sceneId}" not found`);
 
-      const ALLOWED = ["name", "padding", "backgroundColor", "background",
-                       "grid", "navigation", "sort", "navName", "fogExploration",
-                       "initial"];
-      const update = {};
-      const fieldsUpdated = [];
-      for (const k of ALLOWED) {
+      const BASE_FIELDS = ["name", "padding", "grid", "navigation", "sort", "navName", "initial"];
+      const COMPAT_FIELDS = ["backgroundColor", "background", "foreground", "levelFog", "fogExploration", "fog"];
+      const sceneUpdate = {};
+      for (const k of BASE_FIELDS) {
         if (k in params) {
-          update[k] = params[k];
-          fieldsUpdated.push(k);
+          sceneUpdate[k] = params[k];
         }
       }
+      const compatibility = splitSceneCompatibilityFields(params, game.release.generation);
+      Object.assign(sceneUpdate, compatibility.sceneUpdate);
+      const fieldsUpdated = [...BASE_FIELDS, ...COMPAT_FIELDS].filter(k => k in params);
       if (fieldsUpdated.length === 0) {
-        throw new Error(`Provide at least one of: ${ALLOWED.join(", ")}`);
+        throw new Error(`Provide at least one of: ${[...BASE_FIELDS, ...COMPAT_FIELDS].join(", ")}`);
       }
 
-      await scene.update(update);
+      if (Object.keys(sceneUpdate).length > 0) await scene.update(sceneUpdate);
+      const level = await applySceneLevelUpdate(scene, compatibility.levelUpdate);
       return {
         id: scene.id,
         name: scene.name,
-        fieldsUpdated
+        fieldsUpdated,
+        ...(level ? { levelId: level.id } : {}),
       };
     });
   },
@@ -4032,13 +4054,21 @@ const handlers = {
           size:  params.gridSize  ?? 100,
           alpha: params.gridAlpha ?? 0.2,
         },
-        backgroundColor: params.backgroundColor ?? "#1c1c1c",
       };
-      if (params.background) data.background = { src: params.background };
       if (params.folderId)   data.folder     = params.folderId;
+      const compatibility = splitSceneCompatibilityFields({
+        backgroundColor: params.backgroundColor ?? "#1c1c1c",
+        ...("background" in params ? { background: params.background } : {}),
+        ...("foreground" in params ? { foreground: params.foreground } : {}),
+        ...("levelFog" in params ? { levelFog: params.levelFog } : {}),
+        ...("fogExploration" in params ? { fogExploration: params.fogExploration } : {}),
+        ...("fog" in params ? { fog: params.fog } : {}),
+      }, game.release.generation);
+      Object.assign(data, compatibility.sceneUpdate);
 
       const scene = await Scene.create(data);
       if (!scene) throw new Error("Scene.create returned null");
+      const level = await applySceneLevelUpdate(scene, compatibility.levelUpdate);
       if (params.activate !== false) await scene.activate();
       return {
         id: scene.id,
@@ -4046,7 +4076,8 @@ const handlers = {
         active: scene.active,
         width: scene.width,
         height: scene.height,
-        folder: scene.folder?.id ?? null
+        folder: scene.folder?.id ?? null,
+        ...(level ? { levelId: level.id } : {}),
       };
     });
   },
@@ -4185,6 +4216,10 @@ function connect() {
       // Lets the server disambiguate two GMs with the same userName
       // by exposing routing keys like "Gamemaster@foundry.example.com".
       host:     (typeof window !== "undefined" && window.location?.host) || "",
+      origin:   (typeof window !== "undefined" && window.location?.origin) || "",
+      worldId:  game.world?.id || "",
+      systemId: game.system?.id || "",
+      foundryVersion: game.version || "",
     };
     try {
       const t = localStorage.getItem("mcpBridgeToken");

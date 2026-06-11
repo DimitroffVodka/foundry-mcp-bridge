@@ -9,6 +9,21 @@ export const REQUEST_TIMEOUT  = 15_000;
 export const HELLO_DEADLINE_MS = 3000;
 export const SNAPSHOT_TTL_MS   = 30 * 60 * 1000;  // 30 min
 export const SNAPSHOT_MAX_LRU  = 50;
+export const FOUNDRY_URLS      = (process.env.FOUNDRY_URLS ?? "")
+  .split(",")
+  .map(value => value.trim())
+  .filter(Boolean);
+export const RELAUNCH_CONFIG   = {
+  enabled: /^(1|true|yes)$/i.test(process.env.FOUNDRY_RELAUNCH_ENABLED ?? ""),
+  foundryUrl: process.env.FOUNDRY_RELAUNCH_URL ?? "",
+  gmUser: process.env.FOUNDRY_RELAUNCH_GM_USER ?? "",
+  gmPassword: process.env.FOUNDRY_RELAUNCH_GM_PASSWORD ?? "",
+  chromePath: process.env.FOUNDRY_CHROME_PATH ?? "",
+  userDataDir: process.env.FOUNDRY_CHROME_USER_DATA_DIR ?? "",
+  allowRemote: /^(1|true|yes)$/i.test(
+    process.env.FOUNDRY_RELAUNCH_ALLOW_REMOTE ?? ""
+  ),
+};
 
 // --- Security knobs (off by default; opt in via env vars) -----------------
 // When BRIDGE_TOKEN is set, every MCP HTTP request must include the
@@ -26,3 +41,4 @@ export const ALLOW_EVAL       = /^(1|true|yes)$/i.test(process.env.FOUNDRY_MCP_A
 // Gated behind an explicit opt-in so the default install can't be tricked
 // into mutating the world via an LLM hallucination.
 export const ALLOW_WRITE      = /^(1|true|yes)$/i.test(process.env.FOUNDRY_MCP_ALLOW_WRITE ?? "");
+export const ALLOW_SELF_TEST  = /^(1|true|yes)$/i.test(process.env.FOUNDRY_MCP_ALLOW_SELF_TEST ?? "");

@@ -29,6 +29,8 @@ Treat the MCP endpoint with the same trust you'd give a logged-in GM browser ses
 - **CORS lockdown.** The HTTP server rejects any `Origin` header that isn't `localhost` / `127.0.0.1` / `[::1]`. CLI clients (no `Origin`) and the proxy.mjs stdio bridge are unaffected. A malicious site visited in another tab cannot POST to the MCP endpoint with a custom JSON Content-Type without a preflight, and the preflight gets a 403.
 - **`evaluate` is opt-in.** The most dangerous tool is disabled unless `FOUNDRY_MCP_ALLOW_EVAL=1` is set in the server's environment.
 - **World-authoring tools are opt-in.** `create_folder`, `create_actor`, `create_actor_from_compendium`, `add_items_to_actor`, `create_journal_entry`, and `update_journal_page` are disabled unless `FOUNDRY_MCP_ALLOW_WRITE=1` is set. With the gate off they aren't even registered, so they don't appear in any MCP client's tool list.
+- **`self_test` has a second gate.** It requires both the write gate and `FOUNDRY_MCP_ALLOW_SELF_TEST=1`, plus a literal `confirm: true`. Cleanup is limited to documents carrying the current run's unique flag.
+- **Client relaunch is opt-in and loopback-only by default.** `relaunch_client` is absent unless `FOUNDRY_RELAUNCH_ENABLED=1`. It rejects credentials embedded in URLs and non-loopback Foundry hosts unless remote use is explicitly enabled.
 - **Vendored dependencies.** `html2canvas` is bundled in `module/lib/`; the module never fetches code from a CDN at runtime.
 
 ## Opt-in: token auth
@@ -66,6 +68,11 @@ FOUNDRY_MCP_ALLOW_EVAL=1 npm start
 
 You probably want this enabled for serious work — most module debugging benefits from `evaluate`. The opt-in is so that someone trying the bridge for the first time doesn't accidentally hand RCE to a misbehaving AI.
 
+Background evaluations use the same trust model. `job_result` does not grant
+additional execution ability; it only retrieves bounded results from work
+already started by `evaluate`. The store limits individual results to 8 MiB,
+total retained data to 32 MiB, and concurrent jobs to 10.
+
 ## Opt-in: enable world authoring
 
 ```bash
@@ -78,11 +85,50 @@ These are safer than `evaluate` (no arbitrary code execution) but still write to
 
 For Codex CLI users: pairing this opt-in with per-tool `approval_mode = "approve"` on at least `update_journal_page` is a reasonable belt-and-suspenders setup.
 
+## Opt-in: schema self-test
+
+```bash
+FOUNDRY_MCP_ALLOW_WRITE=1 FOUNDRY_MCP_ALLOW_SELF_TEST=1 npm start
+```
+
+The `self_test` tool temporarily creates an Actor, JournalEntry/Page,
+RollTable/TableResult, and Scene/Level. It always attempts cleanup in
+reverse order. Before deleting anything, it verifies the document still
+carries the unique flag for that exact run. Use a disposable or backed-up
+world even with these safeguards.
+
+## Opt-in: GM client relaunch
+
+`relaunch_client` starts a real Chrome/Chromium process through
+`puppeteer-core` and joins the configured Foundry world. It is disabled unless
+all of the following are configured:
+
+```powershell
+$env:FOUNDRY_RELAUNCH_ENABLED = "1"
+$env:FOUNDRY_RELAUNCH_URL = "http://localhost:30000"
+$env:FOUNDRY_RELAUNCH_GM_USER = "Gamemaster"
+$env:FOUNDRY_CHROME_PATH = "C:\Program Files\Google\Chrome\Application\chrome.exe"
+$env:FOUNDRY_CHROME_USER_DATA_DIR = "C:\path\to\dedicated-foundry-profile"
+$env:FOUNDRY_RELAUNCH_GM_PASSWORD = "" # optional
+```
+
+- Keep the Chrome profile dedicated to Foundry automation.
+- Put the GM password only in the server environment. It is not accepted as
+  a tool argument and is redacted from returned errors.
+- Remote Foundry URLs are rejected by default. Setting
+  `FOUNDRY_RELAUNCH_ALLOW_REMOTE=1` opts into sending the configured password
+  to that remote origin; use HTTPS and understand the trust boundary.
+- When the matching GM bridge is already connected, the tool returns without
+  launching another browser.
+
 ## Known residual risks
 
 - **Read-out of sensitive state.** Even without `evaluate`, tools like `get_actor`, `get_console_errors`, and `snapshot_actor` expose the full game state, including GM-only flags and notes. If a connected AI client decides to read everything and exfiltrate it, the bridge will let it. Mitigation: only connect AI clients you trust to handle your game data.
 - **Hot-reload of `server/tools/`.** If an attacker can write to the filesystem, they can drop a malicious tool file and the server will pick it up on next request. Not a new attack surface — at that level of access they already own you.
 - **Multi-user routing.** With `targetUser` set, a tool runs in *that user's* browser context with their permissions. The server enforces routing but not authorization on which user a client is allowed to target. If you connect a non-trusted client and trust it to act as a specific player, it can act as ANY connected user.
+- **Chrome profile and environment secrets.** A local process with access to
+  the server environment or the dedicated Chrome profile can recover the GM
+  credential/session. Protect them with normal OS account permissions.
 
 ## Reporting
 

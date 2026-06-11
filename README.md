@@ -82,12 +82,14 @@ Keep this terminal open. The server auto-reloads tool files but other changes ne
 
 #### Optional: enable opt-in tools
 
-Two categories of tools are **off by default** and won't appear in any client's tool list until you enable them. Read [SECURITY.md](SECURITY.md) before flipping these on.
+Power tools are **off by default** and won't appear in any client's tool list until you enable them. Read [SECURITY.md](SECURITY.md) before flipping these on.
 
 | Env var | Adds | Risk if mis-used |
 |---|---|---|
-| `FOUNDRY_MCP_ALLOW_WRITE=1` | `create_folder`, `create_actor`, `create_actor_from_compendium`, `add_items_to_actor`, `create_journal_entry`, `update_journal_page` | Creates/overwrites persistent world data (actors, journals, folders) |
-| `FOUNDRY_MCP_ALLOW_EVAL=1` | `evaluate` | Arbitrary JS in your Foundry browser context — same trust level as your GM session |
+| `FOUNDRY_MCP_ALLOW_WRITE=1` | World-authoring tools | Creates, updates, or deletes persistent world data |
+| `FOUNDRY_MCP_ALLOW_EVAL=1` | `evaluate`, `job_result` | Arbitrary JS in your Foundry browser context; background jobs and bounded large-result retrieval |
+| `FOUNDRY_MCP_ALLOW_SELF_TEST=1` | `self_test` (also requires writes) | Temporarily creates and deletes uniquely flagged test documents |
+| `FOUNDRY_RELAUNCH_ENABLED=1` | `relaunch_client` | Launches a configured local Chrome and joins as the configured GM |
 
 **One-off** (just this terminal session):
 
@@ -209,7 +211,11 @@ Or run `gemini mcp add foundry-mcp-server http://127.0.0.1:3000/mcp` from the pr
 | `get_macro` | Full macro source code |
 | `get_console_errors` | Recent console errors/warnings |
 | `evaluate` | Run arbitrary JS in Foundry context |
+| `job_result` | Poll background evaluations or read large results in chunks |
 | `list_connected_bridges` | Show which Foundry users are connected (server-local tool) |
+| `bridge_status` | Diagnose bridge and Foundry server availability without a live bridge |
+| `relaunch_client` | Restore a dead configured GM browser session (opt-in) |
+| `self_test` | Guarded Foundry schema-drift smoke test (opt-in) |
 
 See [server/TOOLS.md](server/TOOLS.md) for full tool schemas and arguments.
 
@@ -256,7 +262,16 @@ You should get a 200 with an `mcp-session-id` header.
 | `FOUNDRY_MCP_PORT` | `3000` | HTTP port MCP clients connect to |
 | `FOUNDRY_MCP_URL` | `http://127.0.0.1:3000/mcp` | Used by `proxy.mjs` to find the HTTP server |
 | `FOUNDRY_MCP_ALLOW_EVAL` | `0` | Set to `1` to enable the `evaluate` tool (arbitrary JS in Foundry context). See [SECURITY.md](SECURITY.md). |
+| `FOUNDRY_URLS` | empty | Comma-separated Foundry origins for restart-safe `bridge_status` probes, e.g. `http://localhost:30000`. |
 | `FOUNDRY_MCP_ALLOW_WRITE` | `0` | Set to `1` to enable world-authoring tools (`create_folder`, `create_actor`, `create_journal_entry`, etc.) that mutate persistent world data. See [SECURITY.md](SECURITY.md). |
+| `FOUNDRY_MCP_ALLOW_SELF_TEST` | `0` | Set to `1` alongside `FOUNDRY_MCP_ALLOW_WRITE=1` to register the guarded `self_test` tool. |
+| `FOUNDRY_RELAUNCH_ENABLED` | `0` | Register `relaunch_client`. Requires the URL, GM user, and Chrome path variables below. |
+| `FOUNDRY_RELAUNCH_URL` | empty | Explicit Foundry origin to rejoin, e.g. `http://localhost:30000`. Loopback-only unless remote use is explicitly allowed. |
+| `FOUNDRY_RELAUNCH_GM_USER` | empty | Exact Foundry GM user name selected on the join page. |
+| `FOUNDRY_RELAUNCH_GM_PASSWORD` | empty | Optional GM password. Read only from the server environment; never accepted as a tool argument or returned. |
+| `FOUNDRY_CHROME_PATH` | empty | Absolute path to the Chrome/Chromium executable used by `puppeteer-core`. |
+| `FOUNDRY_CHROME_USER_DATA_DIR` | empty | Optional dedicated Chrome profile directory for the relaunched client. |
+| `FOUNDRY_RELAUNCH_ALLOW_REMOTE` | `0` | Set to `1` to allow a non-loopback `FOUNDRY_RELAUNCH_URL`. |
 | `FOUNDRY_WS_HOST` | `127.0.0.1` | Interface the bridge WebSocket binds to. Default is loopback. Override only if you knowingly want to expose the bridge to your LAN. |
 | `BRIDGE_TOKEN` | (unset) | Shared secret. If set, all MCP HTTP requests must send `Authorization: Bearer <token>` and the Foundry module must store the same value in `localStorage.mcpBridgeToken`. See [SECURITY.md](SECURITY.md). |
 
@@ -264,15 +279,16 @@ You should get a 200 with an `mcp-session-id` header.
 
 - The WebSocket connection auto-reconnects every 5 seconds if Foundry is reloaded. The hello frame is re-sent each time.
 - Console error capture starts when the module loads — errors before the `ready` hook are missed.
-- The `evaluate` tool runs arbitrary JS in the Foundry client context — disabled by default. Enable with `FOUNDRY_MCP_ALLOW_EVAL=1`.
+- The `evaluate` tool runs arbitrary JS in the Foundry client context — disabled by default. Enable with `FOUNDRY_MCP_ALLOW_EVAL=1`. Use `background: true` plus `job_result` for unbounded work; results larger than 256 KiB are returned by handle.
 - World-authoring tools (create actors/folders/journals) also mutate persistent state and are disabled by default. Enable with `FOUNDRY_MCP_ALLOW_WRITE=1`. See [SECURITY.md](SECURITY.md).
+- `relaunch_client` is local and opt-in. Keep its Chrome profile dedicated to Foundry automation and store any GM password only in the server environment.
 - Both ports bind to `127.0.0.1` only — not exposed to the network.
 - No API tokens are consumed by the AI clients. All communication is local: AI client ↔ MCP server ↔ Foundry browser.
 - See [SECURITY.md](SECURITY.md) for the threat model and opt-in auth.
 
 ## Releasing a new version
 
-1. Bump `version` in [module/module.json](module/module.json) and [server/package.json](server/package.json).
+1. Bump `version` in [module/module.json](module/module.json), [server/package.json](server/package.json), and [server/server.js](server/server.js); refresh the root version metadata in `server/package-lock.json`.
 2. Commit, then tag and push: `git tag v0.5.2 && git push --tags`.
 3. The [release workflow](.github/workflows/release.yml) builds `module.zip` and publishes a GitHub Release with `module.json` + `module.zip` attached. The manifest URL `releases/latest/download/module.json` then points at the new version automatically, so Foundry's update check picks it up.
 

@@ -7,9 +7,33 @@
  *   - `reload_foundry`         — orchestrated reload + reconnect + ready wait
  */
 import { z }                                from "zod";
-import { bridges, reconnectWaiters, routeBridge } from "../lib/bridges.js";
+import { bridges, lastSeenBridges, reconnectWaiters, routeBridge } from "../lib/bridges.js";
+import { FOUNDRY_URLS, RELAUNCH_CONFIG }    from "../lib/config.js";
+import { diagnoseBridgeStatus }             from "../lib/bridge-status.js";
+import { createRelaunchHandler }            from "../lib/client-relauncher.js";
 import { requestFoundry }                   from "../lib/foundry-rpc.js";
 import { registerRawTool }                  from "./_helpers.js";
+
+function getBridgeDiagnosis() {
+  return diagnoseBridgeStatus({
+    bridges,
+    lastSeenBridges,
+    configuredOrigins: FOUNDRY_URLS,
+  });
+}
+
+function diagnosisReply(error, diagnosis) {
+  return { content: [{ type: "text", text: JSON.stringify({
+    error,
+    diagnosis,
+  }, null, 2) }] };
+}
+
+const relaunchClient = createRelaunchHandler({
+  config: RELAUNCH_CONFIG,
+  bridges,
+  diagnose: getBridgeDiagnosis,
+});
 
 export function registerServerLocalTools(mcp) {
   registerRawTool(mcp, "list_connected_bridges",
@@ -53,6 +77,38 @@ export function registerServerLocalTools(mcp) {
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     });
 
+  registerRawTool(mcp, "bridge_status",
+    "Diagnose the MCP-to-Foundry connection without requiring a live bridge. "
+    + "Reports connected and last-seen bridges, probes known Foundry /api/status "
+    + "endpoints, and classifies the state as bridge-connected, "
+    + "foundry-up-no-bridge, foundry-up-no-users, foundry-down, or unknown.",
+    {},
+    async () => {
+      const result = await getBridgeDiagnosis();
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    });
+
+  if (RELAUNCH_CONFIG.enabled) {
+    registerRawTool(mcp, "relaunch_client",
+      "Launch the explicitly configured Chrome executable, join the configured "
+      + "Foundry world as the configured GM, and wait for its MCP bridge. "
+      + "This server-local recovery tool is absent unless "
+      + "FOUNDRY_RELAUNCH_ENABLED=1. Credentials are read only from the server "
+      + "environment and are never accepted as tool parameters or returned.",
+      {
+        timeoutMs: z.number().min(5_000).max(120_000).optional().describe(
+          "Total ms to allow for Chrome launch, Foundry join, and bridge registration. "
+          + "Default 30000."
+        ),
+      },
+      async params => {
+        const result = await relaunchClient(params);
+        return {
+          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        };
+      });
+  }
+
   registerRawTool(mcp, "reload_foundry",
     "Reload a Foundry tab and wait until it has reconnected its bridge AND "
     + "`game.ready` is true. Use after editing module code that needs to be "
@@ -74,7 +130,7 @@ export function registerServerLocalTools(mcp) {
       let bridge;
       try { bridge = routeBridge(targetUser); }
       catch (err) {
-        return { content: [{ type: "text", text: `Error: ${err.message}` }] };
+        return diagnosisReply(err.message, await getBridgeDiagnosis());
       }
 
       // Refuse to reload through the legacy fallback bucket — it can't
@@ -134,7 +190,7 @@ export function registerServerLocalTools(mcp) {
           reconnectWaiters.set(targetUserId, { resolve, reject, timer });
         });
       } catch (err) {
-        return { content: [{ type: "text", text: `Error: ${err.message}` }] };
+        return diagnosisReply(err.message, await getBridgeDiagnosis());
       }
       const reconnectedAt = Date.now();
 

@@ -1,0 +1,240 @@
+const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
+const JOIN_FORM = "#join-game-form";
+const USER_SELECT = `${JOIN_FORM} select[name="userid"]`;
+const PASSWORD_INPUT = `${JOIN_FORM} input[name="password"]`;
+const JOIN_BUTTON = `${JOIN_FORM} button[name="join"]`;
+
+function parseFoundryUrl(value) {
+  const input = String(value ?? "").trim();
+  if (!input) return null;
+  try {
+    return new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(input) ? input : `http://${input}`);
+  } catch {
+    return null;
+  }
+}
+
+function bridgeMatches(bridge, validation, gmUser) {
+  if (!bridge?.isGM || bridge.userName !== gmUser) return false;
+  const bridgeUrl = parseFoundryUrl(bridge.origin);
+  if (bridgeUrl?.origin === validation.origin) return true;
+  return bridge.host === validation.host;
+}
+
+function findMatchingBridge(bridges, validation, gmUser) {
+  for (const bridge of bridges.values()) {
+    if (bridgeMatches(bridge, validation, gmUser)) return bridge;
+  }
+  return null;
+}
+
+function safeError(error, secrets = []) {
+  let message = error instanceof Error ? error.message : String(error);
+  for (const secret of secrets) {
+    if (secret) message = message.replaceAll(secret, "[redacted]");
+  }
+  return message;
+}
+
+function clampTimeout(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return 30_000;
+  return Math.max(5_000, Math.min(120_000, Math.trunc(parsed)));
+}
+
+async function defaultLaunchBrowser(options) {
+  const puppeteer = await import("puppeteer-core");
+  return puppeteer.launch(options);
+}
+
+export function validateRelaunchConfig(config) {
+  const errors = [];
+  const url = parseFoundryUrl(config?.foundryUrl);
+
+  if (!config?.enabled) errors.push("FOUNDRY_RELAUNCH_ENABLED must be set to 1");
+  if (!String(config?.chromePath ?? "").trim()) {
+    errors.push("FOUNDRY_CHROME_PATH is required");
+  }
+  if (!String(config?.gmUser ?? "").trim()) {
+    errors.push("FOUNDRY_RELAUNCH_GM_USER is required");
+  }
+  if (!url) {
+    errors.push("FOUNDRY_RELAUNCH_URL must be a valid HTTP(S) URL");
+  } else {
+    if (!["http:", "https:"].includes(url.protocol)) {
+      errors.push("FOUNDRY_RELAUNCH_URL must use HTTP or HTTPS");
+    }
+    if (url.username || url.password) {
+      errors.push("FOUNDRY_RELAUNCH_URL must not contain credentials");
+    }
+    if (!config?.allowRemote && !LOOPBACK_HOSTS.has(url.hostname)) {
+      errors.push(
+        "FOUNDRY_RELAUNCH_URL must use a loopback host unless "
+        + "FOUNDRY_RELAUNCH_ALLOW_REMOTE=1"
+      );
+    }
+  }
+
+  return {
+    valid: errors.length === 0,
+    errors,
+    origin: url?.origin ?? "",
+    host: url?.host ?? "",
+    joinUrl: url ? new URL("/join", url.origin).toString() : "",
+  };
+}
+
+export function createRelaunchHandler({
+  config,
+  bridges,
+  launchBrowser = defaultLaunchBrowser,
+  sleep = ms => new Promise(resolve => setTimeout(resolve, ms)),
+  diagnose,
+}) {
+  let managedBrowser = null;
+  let inFlight = null;
+
+  async function run({ timeoutMs } = {}) {
+    const validation = validateRelaunchConfig(config);
+    if (!validation.valid) {
+      return {
+        ready: false,
+        configurationError: true,
+        errors: validation.errors,
+      };
+    }
+
+    const existing = findMatchingBridge(bridges, validation, config.gmUser);
+    const targetUser = `${config.gmUser}@${validation.host}`;
+    if (existing) {
+      return {
+        ready: true,
+        alreadyConnected: true,
+        targetUser,
+        origin: validation.origin,
+      };
+    }
+
+    const boundedTimeout = clampTimeout(timeoutMs);
+    const startedAt = Date.now();
+    let browser = null;
+    let page = null;
+    let submitted = false;
+
+    try {
+      if (managedBrowser) {
+        try { await managedBrowser.close(); } catch { /* stale browser */ }
+        managedBrowser = null;
+      }
+
+      const launchOptions = {
+        executablePath: config.chromePath,
+        headless: false,
+        defaultViewport: null,
+        args: [
+          "--disable-background-timer-throttling",
+          "--disable-backgrounding-occluded-windows",
+          "--disable-renderer-backgrounding",
+        ],
+      };
+      if (config.userDataDir) launchOptions.userDataDir = config.userDataDir;
+
+      browser = await launchBrowser(launchOptions);
+      managedBrowser = browser;
+      browser.on?.("disconnected", () => {
+        if (managedBrowser === browser) managedBrowser = null;
+      });
+
+      page = await browser.newPage();
+      const pageTimeout = Math.min(boundedTimeout, 30_000);
+      await page.goto(validation.joinUrl, {
+        waitUntil: "domcontentloaded",
+        timeout: pageTimeout,
+      });
+      await page.waitForSelector(USER_SELECT, { timeout: pageTimeout });
+
+      const users = await page.$eval(USER_SELECT, select =>
+        Array.from(select.options).map(option => ({
+          text: option.textContent.trim(),
+          value: option.value,
+          disabled: option.disabled,
+        }))
+      );
+      const gm = users.find(user => user.text === config.gmUser);
+      if (!gm) {
+        throw new Error(`Configured GM user "${config.gmUser}" is not present on the join page`);
+      }
+      if (gm.disabled) {
+        throw new Error(
+          `Configured GM user "${config.gmUser}" is disabled on the join page`
+        );
+      }
+
+      await page.select(USER_SELECT, gm.value);
+      if (config.gmPassword) {
+        await page.type(PASSWORD_INPUT, config.gmPassword);
+      }
+
+      const [navigation, click] = await Promise.allSettled([
+        page.waitForNavigation({
+          waitUntil: "domcontentloaded",
+          timeout: Math.min(boundedTimeout, 15_000),
+        }),
+        page.click(JOIN_BUTTON),
+      ]);
+      if (click.status === "rejected") throw click.reason;
+      submitted = true;
+
+      const deadline = startedAt + boundedTimeout;
+      while (Date.now() < deadline) {
+        const connected = findMatchingBridge(bridges, validation, config.gmUser);
+        if (connected) {
+          return {
+            ready: true,
+            alreadyConnected: false,
+            launched: true,
+            targetUser,
+            origin: validation.origin,
+            durationMs: Date.now() - startedAt,
+          };
+        }
+        await sleep(250);
+      }
+
+      const result = {
+        ready: false,
+        launched: true,
+        targetUser,
+        origin: validation.origin,
+        currentUrl: page.url(),
+        error: `Timed out after ${boundedTimeout}ms waiting for the configured GM bridge`,
+      };
+      if (diagnose) result.diagnosis = await diagnose();
+      return result;
+    } catch (error) {
+      if (!submitted && browser) {
+        try { await browser.close(); } catch { /* best-effort cleanup */ }
+        if (managedBrowser === browser) managedBrowser = null;
+      }
+      const result = {
+        ready: false,
+        launched: !!browser,
+        targetUser,
+        origin: validation.origin,
+        error: safeError(error, [config.gmPassword]),
+      };
+      if (diagnose) result.diagnosis = await diagnose();
+      return result;
+    }
+  }
+
+  return async params => {
+    if (inFlight) return inFlight;
+    inFlight = run(params);
+    try {
+      return await inFlight;
+    } finally {
+      inFlight = null;
+    }
+  };
+}

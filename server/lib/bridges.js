@@ -22,6 +22,7 @@ import { log }                        from "./log.js";
 import { pendingRequests }            from "./foundry-rpc.js";
 
 export const bridges          = new Map();   // userId → { socket, userId, userName, isGM, connectedAt }
+export const lastSeenBridges  = new Map();   // userId → last identified bridge metadata (without socket)
 export const reconnectWaiters = new Map();   // userId → { resolve, reject, timer }
 const pendingHello            = new WeakMap();// socket → setTimeout id
 
@@ -139,7 +140,7 @@ export function startBridgeServer() {
           return;
         }
 
-        const { userId, userName, isGM, host } = msg;
+        const { userId, userName, isGM, host, origin, worldId, systemId, foundryVersion } = msg;
         if (!userId || !userName) {
           log(`Bridge sent malformed hello, ignoring: ${JSON.stringify(msg)}`);
           return;
@@ -161,9 +162,18 @@ export function startBridgeServer() {
           userName,
           isGM: !!isGM,
           host: host || "",
+          origin: origin || "",
+          worldId: worldId || "",
+          systemId: systemId || "",
+          foundryVersion: foundryVersion || "",
           connectedAt: Date.now(),
         };
         bridges.set(userId, bridge);
+        lastSeenBridges.set(userId, {
+          ...bridge,
+          socket: undefined,
+          disconnectedAt: null,
+        });
         const hostStr = host ? ` @ ${host}` : "";
         log(`Bridge registered: ${userName}${hostStr} (${userId}) [${isGM ? "GM" : "player"}]`);
 
@@ -199,7 +209,14 @@ export function startBridgeServer() {
       for (const [key, b] of bridges) {
         if (b.socket === socket) { removed = b; bridges.delete(key); break; }
       }
-      if (removed) log(`Bridge closed: ${removed.userName}`);
+      if (removed) {
+        lastSeenBridges.set(removed.userId, {
+          ...removed,
+          socket: undefined,
+          disconnectedAt: Date.now(),
+        });
+        log(`Bridge closed: ${removed.userName}`);
+      }
       else         log("Unidentified bridge socket closed");
 
       // Reject pending requests waiting on this specific socket.

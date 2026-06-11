@@ -32,7 +32,31 @@ Every tool that modifies the Foundry world (creates, updates, or deletes documen
 
 **Efficiency Note:** Full snapshots are limited to 10 documents per call to keep context window usage low. If more are affected, the audit will note the truncation. Use this to self-verify your work in an **Act -> Validate** loop.
 
-The only non-routed (server-local) tool is `list_connected_bridges` itself.
+The server-local tools are `list_connected_bridges`, `bridge_status`,
+`reload_foundry`, and the opt-in `relaunch_client`. They inspect or
+orchestrate the bridge process directly instead of proxying a normal tool
+call through Foundry.
+
+## Write compatibility audit
+
+The released module manifest currently requires Foundry v14. The v13 column
+documents retained compatibility paths in the bridge; it is static-only and
+is not a promise of full v13 module support.
+
+| Write surface | Foundry v13 | Foundry v14 |
+|---|---|---|
+| Actors, embedded Items, folders, journals/pages, tokens, combat, chat, templates | Native document create/update/delete APIs | Same APIs; no schema translation required |
+| Actor ownership | Friendly level names are resolved to numeric ownership levels before update | Same; avoids writing role names or raw user-facing labels into the document |
+| Scene background/foreground/fog | Legacy Scene fields (`background`, `backgroundColor`, `foreground`, `fogExploration`) | `background`/`foreground`/level fog map to the default embedded Level; exploration maps to `Scene.fog.mode` |
+| Scene Levels | Not available; level-only inputs error clearly | Native embedded `Level` CRUD |
+| Regions | Passed through to the core Region schema | Passed through to the core Region schema, including level membership |
+| RollTable results | No dedicated authoring tool; legacy `.text` is not written | `self_test` validates `TableResult.description` |
+| Compendium configuration | No write tool calls `pack.configure`; label/ownership schema drift is therefore not exposed | Same |
+| Snapshots/diffs | Read-only | Read-only |
+
+The guarded `self_test` provides the runtime check for representative Actor,
+JournalEntry/Page, RollTable/TableResult, and Scene/Level writes after a
+Foundry core update.
 
 ---
 
@@ -67,6 +91,50 @@ This is a **server-local** tool — it doesn't proxy through any bridge — so i
     - `targetUser` — the canonical routing value to pass to other tools. Equal to `userName` when unambiguous, or `userName@host` when the same name is connected from multiple worlds. `userId` is also accepted as an unambiguous escape hatch.
   - `legacyBridgeConnected` — `true` if a pre-multi-user bridge is also attached (only present when applicable). Indicates the user should upgrade their bridge module to address it by name.
   - `note` — when `legacyBridgeConnected` is set, a human-readable explanation.
+
+### `bridge_status`
+Diagnose the full connection chain even when no Foundry bridge is currently
+connected. Combines current and last-seen bridge metadata with REST probes of
+known Foundry `/api/status` endpoints.
+
+- **Params**: none.
+- **Returns**:
+  - `classification` — one of `bridge-connected`,
+    `foundry-up-no-bridge`, `foundry-up-no-users`, `foundry-down`, or
+    `unknown`.
+  - `bridges` — currently connected identified bridges.
+  - `lastSeenBridges` — retained metadata from bridges seen since server start.
+  - `probes` — REST status or error details for each known Foundry origin.
+- **Restart-safe targets**: set `FOUNDRY_URLS` to a comma-separated list such
+  as `http://localhost:30000,https://foundry.example.com`. This lets the server
+  diagnose Foundry before any bridge has connected after a server restart.
+
+### `reload_foundry`
+Reload a targeted Foundry browser tab, wait for the same user bridge to
+reconnect, then poll until `game.ready === true`.
+
+- **Params**: `targetUser?`, `timeoutMs?` (default 30000).
+- **Failure behavior**: routing and reconnect failures return the same
+  structured diagnosis as `bridge_status`, alongside the reload error.
+
+### `relaunch_client` (opt-in)
+Recover from a discarded or closed GM browser tab by launching the explicitly
+configured Chrome executable, opening `/join`, selecting the configured GM,
+submitting the environment-only password, and waiting for the bridge.
+
+- **Gate**: absent unless `FOUNDRY_RELAUNCH_ENABLED=1`.
+- **Required config**: `FOUNDRY_RELAUNCH_URL`,
+  `FOUNDRY_RELAUNCH_GM_USER`, and `FOUNDRY_CHROME_PATH`.
+- **Optional config**: `FOUNDRY_RELAUNCH_GM_PASSWORD`,
+  `FOUNDRY_CHROME_USER_DATA_DIR`, and
+  `FOUNDRY_RELAUNCH_ALLOW_REMOTE=1`.
+- **Network policy**: the Foundry URL must use localhost, `127.0.0.1`, or
+  `[::1]` unless remote relaunch is explicitly enabled.
+- **Credential policy**: passwords are never accepted as tool parameters and
+  are redacted from errors.
+- **Params**: `timeoutMs?` (5000-120000, default 30000).
+- **Already connected**: returns immediately without launching Chrome when
+  the configured GM bridge is already present.
 
 ---
 
@@ -220,10 +288,10 @@ Full macro source.
 ## Debugging
 
 ### `get_console_errors`
-Rolling buffer of `console.error`/`console.warn` captured by the bridge. The bridge patches `console.error` and `console.warn` at load; buffer cap is **50** (oldest entries drop). Invaluable for catching silent failures inside the Foundry client.
+Rolling buffer of `console.error`/`console.warn` captured by the bridge. The bridge patches `console.error` and `console.warn` at load; buffer cap is **1000** (oldest entries drop). Invaluable for catching silent failures inside the Foundry client.
 
-- **Params**: `count?` (default: all; max 50)
-- **Returns**: `[{ level: "error"|"warn", message, timestamp }]` newest last. `message` is the joined arguments; objects are JSON-stringified.
+- **Params**: `count?`, `sinceMs?` (default 60000), `level?`.
+- **Returns**: `{ bufferSize, bufferCapacity, returned, entries }`.
 
 ### `trace_hook`
 Registers a temporary listener on a named Foundry hook, collects firings, then unregisters. Use this to figure out what args a hook receives before writing code against it.
@@ -239,17 +307,45 @@ Registers a temporary listener on a named Foundry hook, collects firings, then u
 ### `evaluate`
 **The power tool.** Runs arbitrary JavaScript in the Foundry client context. The `expression` you pass becomes the body of an async function with `game`, `canvas`, `ui` injected as parameters. Use `return` to send a value back.
 
-- **Params**: `expression` (required) — JS source. Multiple statements OK. Use `return` for the return value.
-- **Returns**: serialized return value, **or** `{ error: message, stack }` on throw.
+- **Params**:
+  - `expression` (required) — JS source. Multiple statements OK. Use `return`
+    for the return value.
+  - `timeoutMs?` — server-side wait limit, clamped to 5000–180000ms. Omit to
+    retain the default 15000ms timeout.
+  - `background?` — when true, start the evaluation as a job and return
+    immediately with `{ jobId, status: "running", startedAt }`.
+- **Returns**: `{ result, evalMs }`, a background job id, a large-result
+  handle, or `{ error, stack }` on throw.
 - **Return serialization**:
   - Foundry documents are `toObject()`'d (so you get the raw data, not the live doc).
   - Everything else is `JSON.parse(JSON.stringify(result))` — so non-serializable values (functions, circular refs, `undefined`) are lost.
+  - Results larger than 256 KiB return `{ resultHandle, preview, totalBytes,
+    totalChars }` instead of being sent inline.
 - **Examples**:
   - `return game.user.name;`
   - `return canvas.walls.objects.children.length;`
   - `const a = game.actors.getName("Sassafrass"); return a.system.stats;`
   - `await game.settings.set("core", "compendiumConfiguration", {}); return "ok";`
-- **Gotcha**: you see the `return` value synchronously-serialized at the moment the function returns. To wait on a hook or a UI event, block inside the expression.
+- **Gotcha**: use `background: true` for work that may outlive any practical
+  request timeout. Running JavaScript cannot be canceled safely.
+
+### `job_result`
+Poll a background evaluation or read a large JSON result in bounded chunks.
+
+- **Params**:
+  - `jobId` — job id or result handle returned by `evaluate`.
+  - `waitMs?` — bounded long-poll wait, 0-10000ms.
+  - `offset?` — character offset for a large serialized result.
+  - `length?` — 1-65536 characters.
+  - `delete?` — delete a settled entry instead of reading it.
+- **Small completed jobs**: return the parsed result inline.
+- **Large results**: return `{ chunk, offset, nextOffset, totalChars,
+  totalBytes, done }`.
+- **Storage bounds**: 30-minute TTL, 50 entries, 8 MiB per entry, 32 MiB
+  total, and 10 concurrently running jobs. Old settled entries are evicted
+  least-recently-used when space is required.
+- **Cancellation**: running jobs cannot be deleted or canceled; deletion is
+  allowed after settlement.
 
 ---
 
@@ -264,6 +360,8 @@ Fast snapshot of the PIXI game canvas (map + tokens, at your current pan/zoom). 
   - `format?` — `"jpeg"` (default) or `"png"`.
 - **Returns**: MCP image content + caption `Canvas screenshot — W×H mime`.
 - **Does NOT capture**: DOM overlays (character sheets, HUD, notifications, targeting reticles) — only the PIXI canvas.
+- **Hidden-tab handling**: advances the PIXI ticker immediately before capture
+  so queued placeable render flags are applied even when the tab is backgrounded.
 
 ### `screenshot_dom`
 Screenshot an arbitrary **DOM element** (character sheets, HUD, chat cards, app windows, sidebar) via `html2canvas`. Fills the gap that `screenshot` intentionally leaves — `screenshot` is PIXI-only. `html2canvas` is lazy-loaded from `cdn.jsdelivr.net` on first call and cached on `globalThis._mcp_html2canvas` for subsequent calls.
@@ -290,6 +388,8 @@ Like `screenshot` but at **full resolution**, **WebP**, and with a **coordinate 
 - **Params**: none
 - **Returns**: MCP image content + caption `Scene "name" [id] — W×H image/webp with grid overlay`.
 - **Overlay details**: 1px white grid lines at 15% alpha, PIXI.Text labels per cell at 22% of `gridSize` font size, black stroke, 65% alpha. Overlay is added to the stage, the stage is rendered to RenderTexture, the overlay is destroyed after. Live view unaffected once the next ticker frame runs.
+- **Hidden-tab handling**: advances the PIXI ticker before adding and rendering
+  the overlay, preventing newly-created placeables from being captured at `(0,0)`.
 
 ---
 
@@ -523,6 +623,20 @@ Pop a Roll dialog on the target user's screen. The user clicks Roll or Cancel; t
 These tools **create and modify persistent world data** (actors, items, journals, folders). They are gated behind `FOUNDRY_MCP_ALLOW_WRITE=1` on the server. With the gate off, none of them are registered — they don't appear in any MCP client's tool list and cannot be called.
 
 They all route through `targetUser`. The actual document creation runs in that user's browser context with that user's permissions.
+
+### `self_test` (additional opt-in)
+Run a guarded schema-drift smoke test after a Foundry core update.
+
+- **Gates**: requires both `FOUNDRY_MCP_ALLOW_WRITE=1` and
+  `FOUNDRY_MCP_ALLOW_SELF_TEST=1`.
+- **Params**: `confirm: true` is mandatory.
+- **Behavior**: creates uniquely named and flagged Actor, JournalEntry/Page,
+  RollTable/TableResult, and Scene/Level documents; round-trips representative
+  fields; then performs reverse-order cleanup in `finally`.
+- **Cleanup guard**: a document is deleted only when its
+  `foundry-mcp-live.selfTestRun` flag still matches the current run id.
+- **Returns**: `{ runId, pass, checks, cleanup }`. Any failed assertion or
+  undeleted document makes `pass` false.
 
 ### `create_folder`
 Create a sidebar folder. **Idempotent** — if a folder with the same `type` + `name` + `parentFolder` already exists, returns it with `existed: true` instead of creating a duplicate.
