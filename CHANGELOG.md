@@ -2,6 +2,35 @@
 
 All notable changes to Foundry MCP Live are documented in this file.
 
+## [0.17.0] - 2026-06-18
+
+> **Updating the module does NOT update the server.** This release requires
+> updating the server too — see [docs/updating-the-server.md](docs/updating-the-server.md).
+
+### Added
+
+- `trace_workflow` tool — preset-driven workflow tracing (snapshot → trace
+  hooks → optional trigger → diff) in one call. Presets verified live against
+  Midi-QOL v14.0.8 / dnd5e 5.3.3. See [docs/debugging-recipes.md](docs/debugging-recipes.md).
+- Server-version handshake: the server reports its version in a `hello-ack`;
+  the module warns the GM (toast + dialog with copy-paste update commands and a
+  link to the update guide) when the server is older than the module.
+- GM-only **"Allow AI to modify the world"** setting — toggles the bridge to
+  read-only at runtime with no server restart, within the server's write
+  ceiling. `evaluate` remains env-gated.
+
+### Fixed
+
+- Pin `zod` to v3 (`^3.25.76`). zod 4 broke `tools/list` with
+  "Cannot read properties of undefined (reading '_zod')", so clients saw zero
+  tools.
+- Hook-arg serializer now collapses Foundry placeables / PIXI objects to a short
+  summary (Midi hook args were dumping the entire token scene-graph).
+- `trace_workflow` propagates its window length to the RPC deadline, and its
+  Midi damage hooks use the correct v14 names (`isDamaged`/`isHealed`).
+- `trace_workflow` Midi presets must be triggered via `use_item` (not
+  `request_item_use`, which bypasses Midi) — documented.
+
 ## [0.16.0] - 2026-06-11
 
 ### Added

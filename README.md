@@ -70,6 +70,7 @@ The server is HTTP-based and must be running before any client connects:
 cd server
 npm start
 # or on Windows: server\start.bat
+# or on macOS/Linux: ./start.sh
 ```
 
 You should see:
@@ -79,6 +80,36 @@ MCP HTTP server  listening on http://127.0.0.1:3000/mcp
 ```
 
 Keep this terminal open. The server auto-reloads tool files but other changes need a restart.
+
+#### Optional: run on Linux login/boot with systemd
+
+For a Linux workstation or small dedicated host, install the included user service:
+
+```bash
+./scripts/install-linux-user-service.sh
+```
+
+This creates:
+
+- `~/.config/systemd/user/foundry-mcp-live.service` — a user-level systemd service that runs `server/server.js` from this checkout.
+- `~/.config/foundry-mcp-live/server.env` — optional environment overrides for ports, write/eval gates, bridge token, and relaunch settings.
+
+Useful commands:
+
+```bash
+systemctl --user status foundry-mcp-live.service
+journalctl --user -u foundry-mcp-live.service -f
+systemctl --user restart foundry-mcp-live.service
+systemctl --user disable --now foundry-mcp-live.service
+```
+
+User services normally start when you log in. To start this service at machine boot before login, enable lingering once:
+
+```bash
+sudo loginctl enable-linger "$USER"
+```
+
+The systemd service keeps the same safe defaults as `npm start`: write, eval, self-test, and relaunch tools stay off unless you uncomment or add the matching variables in `~/.config/foundry-mcp-live/server.env`.
 
 #### Optional: enable opt-in tools
 
@@ -187,6 +218,29 @@ Or run `gemini mcp add foundry-mcp-server http://127.0.0.1:3000/mcp` from the pr
 1. Make sure the MCP server is running (step 3).
 2. Open your Foundry VTT world with the bridge module active. You should see a notification: "MCP Bridge connected to Claude Desktop".
 3. Launch your AI client. The Foundry tools should appear in its tool list.
+
+## Updating the server
+
+The **module** updates through Foundry's normal update flow. The **server** is a
+separate process and updates manually — when it's out of date, the module shows
+a warning in Foundry with these same commands.
+
+```bash
+# Linux (systemd service)
+cd ~/foundry-mcp-live && git pull
+cd server && npm install
+systemctl --user restart foundry-mcp-live
+
+# Windows / macOS / manual
+git pull                 # or re-download the latest release
+cd server && npm install # required when dependencies change
+# then restart the server: start.bat (Windows) or start.sh (Linux/macOS)
+```
+
+> Always run `npm install` after pulling — some fixes are dependency changes and
+> won't take effect from `git pull` alone.
+
+Full per-platform walkthrough: **[docs/updating-the-server.md](docs/updating-the-server.md)**.
 
 ## Available Tools
 
