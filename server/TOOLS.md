@@ -303,6 +303,18 @@ Registers a temporary listener on a named Foundry hook, collects firings, then u
 - **Returns**: `{ hook, reason: "count"|"timeout", firings: [{ at: timestamp, args: [...] }] }`
 - **How args are serialized**: Foundry documents are summarized to `{_document: "Actor"|"Token"|…, id, name, uuid}` (full serialization would be huge). Maps become objects, Sets become arrays, arrays are truncated to 10 items, object keys to 25. Depth capped at 3.
 - **Practical uses**: Hook into `preCreateChatMessage` to see what a click produces; `renderActorSheet` to see the app/html/data args; `updateToken` to learn what field changed.
+- **Siblings**: `trace_hooks` (many hooks at once → one time-ordered timeline, with an `until` terminator) and `trace_socket` (taps `game.socket` in/out events). See `trace_workflow` below to drive these from a preset.
+
+### `trace_workflow`
+One-call **investigation** built on top of `trace_hooks` + `snapshot_actors` + `diff`. Expands a named **preset** into the exact hook list — Foundry has no wildcard hook matching, so this is how you trace a full Midi-QOL workflow without hand-typing ~12 hook strings — opens the window, optionally fires the action inside it, and (with `watch`) returns a before/after actor diff next to the timeline.
+
+- **Params**:
+  - `preset` (required) — one of `midi-full`, `midi-damage`, `active-effect`, `document-lifecycle`, `dnd5e-roll`. Defined in [`server/lib/workflow-presets.js`](lib/workflow-presets.js).
+  - `watch?` — actor id(s)/name(s) to snapshot before+after and diff (live walk, so AE-modified derived stats surface).
+  - `trigger?` — `{ tool, params }` bridge call to fire mid-window (e.g. `request_item_use`) so the action and its trace are one call.
+  - `select?`, `extraHooks?`, `count?`, `timeoutMs?`, `until?`, `triggerDelayMs?` — overrides; each defaults from the preset.
+- **Returns**: `{ preset, hooks, reason, timeline: [{dt, hook, args}], diff?, summary?, triggerError? }`.
+- **See**: [`docs/debugging-recipes.md`](../docs/debugging-recipes.md) for the scenario→hook lookup table behind every preset.
 
 ### `evaluate`
 **The power tool.** Runs arbitrary JavaScript in the Foundry client context. The `expression` you pass becomes the body of an async function with `game`, `canvas`, `ui` injected as parameters. Use `return` to send a value back.
