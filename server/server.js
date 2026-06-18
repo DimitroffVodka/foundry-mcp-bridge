@@ -22,7 +22,7 @@ import { createMcpExpressApp }            from "@modelcontextprotocol/sdk/server
 import { randomUUID }                     from "crypto";
 
 import { log }                            from "./lib/log.js";
-import { HTTP_PORT, BRIDGE_TOKEN, ALLOW_EVAL } from "./lib/config.js";
+import { HTTP_PORT, BRIDGE_TOKEN, ALLOW_EVAL, SERVER_VERSION } from "./lib/config.js";
 import { startBridgeServer }              from "./lib/bridges.js";
 import { startHotReloadWatcher }          from "./lib/hot-reload.js";
 import { registerTools }                  from "./tools/index.js";
@@ -127,7 +127,7 @@ app.all("/mcp", async (req, res) => {
     }
   };
 
-  const mcp = new McpServer({ name: "foundry-vtt", version: "0.16.0" });
+  const mcp = new McpServer({ name: "foundry-vtt", version: SERVER_VERSION });
   await registerTools(mcp);
   await mcp.connect(transport);
   await transport.handleRequest(req, res, req.body);

@@ -67,11 +67,15 @@ export function registerTracingTools(mcp) {
   // bridge already exposes. The value it adds is the PRESET (exact hook names —
   // Foundry has no wildcard hook matching) and the snapshot↔trace correlation.
   //
-  // STUB STATUS: the trace + snapshot/diff paths are complete. The `trigger`
-  // path is best-effort and unverified against a live Midi-QOL world — the
-  // 150ms registration delay (triggerDelayMs) is a heuristic. If a workflow's
-  // first hook fires before the listeners attach, raise it. TODO: replace the
-  // delay with an ack from the bridge once trace_hooks reports "listeners live".
+  // VERIFIED against a live Midi-QOL v14 world (dnd5e 5.3.3): the preset hook
+  // names fire as listed and the trigger path captures the full workflow when
+  // driven via `use_item`. Two gotchas learned there, now handled:
+  //   - the trigger must go through Midi (use_item → item.use()); request_item_use
+  //     bypasses Midi and fires zero midi-qol.* hooks.
+  //   - rpcTimeout below must outlast the trace window (the server→Foundry RPC
+  //     default is 15s), or the RPC times out before the window closes.
+  // Remaining heuristic: the triggerDelayMs registration beat (default 150ms).
+  // TODO: replace it with an ack once trace_hooks reports "listeners live".
   // -------------------------------------------------------------------------
   registerRawTool(mcp, "trace_workflow",
     "One-call workflow investigation. Expands a named PRESET into the exact "
@@ -79,9 +83,12 @@ export function registerTracingTools(mcp) {
     + "you trace e.g. a full Midi-QOL workflow without memorising ~12 hook "
     + "strings), opens a trace window, and — if you pass `watch` — snapshots "
     + "those actors before/after and returns a structural diff alongside the "
-    + "hook timeline. Optionally fires `trigger` (any bridge tool, e.g. "
-    + "request_item_use) INSIDE the window so the action and its trace are one "
-    + "call. Returns { preset, hooks, timeline, reason, diff?, summary? }.\n\n"
+    + "hook timeline. Optionally fires `trigger` (any bridge tool) INSIDE the "
+    + "window so the action and its trace are one call. For the Midi presets the "
+    + "trigger MUST invoke Midi's workflow — use `use_item` (calls item.use(), "
+    + "which Midi patches via libWrapper), NOT `request_item_use` (it bypasses "
+    + "Midi through a direct dispatcher, so no midi-qol.* hooks fire). Returns "
+    + "{ preset, hooks, timeline, reason, diff?, summary? }.\n\n"
     + "Presets:\n  " + presetCatalogue(),
     {
       preset: z.enum(PRESET_KEYS).describe("Which workflow preset to trace."),
@@ -130,6 +137,12 @@ export function registerTracingTools(mcp) {
         timeoutMs: timeoutMs ?? 8000,
         until:     until ?? def.until ?? undefined,
       };
+      // The server→Foundry RPC has its own default timeout (REQUEST_TIMEOUT,
+      // 15s). The trace window can be longer than that, and the trigger may
+      // run for the whole window, so both RPCs must be given a deadline that
+      // outlasts the window — otherwise the RPC times out before the bridge
+      // closes the trace and returns the timeline.
+      const rpcTimeout = traceParams.timeoutMs + 5000;
 
       try {
         // 1. before-snapshot
@@ -144,14 +157,14 @@ export function registerTracingTools(mcp) {
         }
 
         // 2. open the trace window (don't await yet)
-        const tracePromise = requestFoundry("trace_hooks", traceParams, targetUser);
+        const tracePromise = requestFoundry("trace_hooks", traceParams, targetUser, rpcTimeout);
 
         // 3. fire the trigger inside the window, after a registration beat
         let triggerError = null;
         if (trigger?.tool) {
           await sleep(Math.max(0, triggerDelayMs ?? 150));
           try {
-            const tRes = await requestFoundry(trigger.tool, trigger.params || {}, targetUser);
+            const tRes = await requestFoundry(trigger.tool, trigger.params || {}, targetUser, rpcTimeout);
             if (tRes?.error) triggerError = tRes.error;
           } catch (err) {
             triggerError = err.message;

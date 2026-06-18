@@ -16,13 +16,17 @@
  * suggested snapshot scope) so the agent issues ONE call instead of
  * remembering the hook chain.
  *
- * Hook names verified against Midi-QOL v13 (the v11+ "workflow state machine"
- * refactor): each workflow state emits `pre<State>` and `post<State>`, plus the
- * stable macro-facing hooks (RollComplete / AttackRollComplete /
- * DamageRollComplete / damaged / healed). Core dnd5e + Foundry document hooks
- * are used for the system-level / lifecycle presets.
+ * Hook names verified against the Midi-QOL v14.0.8 SOURCE (not just the README)
+ * and a live end-to-end trace: the workflow fires its mid/post hooks via a
+ * `callMidiHooks(...)` helper (preCheckHits, hitsChecked, AttackRollComplete,
+ * DamageRollComplete, preCheckSaves, postCheckSaves, postActiveEffects,
+ * RollComplete), the `pre*` hooks dynamically, and the post-damage hook as
+ * `midi-qol.${"isDamaged"|"isHealed"}`. Core dnd5e + Foundry document hooks are
+ * used for the system-level / lifecycle presets.
  *
- * Source: https://gitlab.com/tposney/midi-qol  (v13 README hook reference)
+ * Sources: installed module `midi-qol/midi-qol.js` (v14.0.8) + Foundry API
+ * <https://foundryvtt.com/api/>. The v13 README named the post-damage hooks
+ * "damaged"/"healed" — stale; v14 fires isDamaged/isHealed (verified live).
  *
  * Each preset:
  *   - hooks   : exact hook strings to register (order doesn't matter; the
@@ -51,8 +55,11 @@ export const WORKFLOW_PRESETS = {
       "midi-qol.preDamageRoll",
       "midi-qol.DamageRollComplete",
       "midi-qol.preTargetDamageApplication",
-      "midi-qol.damaged",
-      "midi-qol.healed",
+      // v14.0.8 source fires `midi-qol.${healedDamaged}` where healedDamaged is
+      // "isDamaged" / "isHealed" — args (token, {item, workflow, damageItem, ditem}).
+      // Older Midi/READMEs documented "damaged"/"healed"; those do NOT fire in v14.
+      "midi-qol.isDamaged",
+      "midi-qol.isHealed",
       "midi-qol.preApplyDynamicEffects",
       "midi-qol.postActiveEffects",
       "midi-qol.RollComplete",
@@ -69,8 +76,11 @@ export const WORKFLOW_PRESETS = {
       "midi-qol.dnd5ePreCalculateDamage",
       "midi-qol.dnd5eCalculateDamage",
       "midi-qol.preTargetDamageApplication",
-      "midi-qol.damaged",
-      "midi-qol.healed",
+      // v14.0.8 source fires `midi-qol.${healedDamaged}` where healedDamaged is
+      // "isDamaged" / "isHealed" — args (token, {item, workflow, damageItem, ditem}).
+      // Older Midi/READMEs documented "damaged"/"healed"; those do NOT fire in v14.
+      "midi-qol.isDamaged",
+      "midi-qol.isHealed",
       "midi-qol.RollComplete",
     ],
   },

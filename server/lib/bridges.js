@@ -17,7 +17,7 @@
  * installs keep working until they're upgraded.
  */
 import { WebSocketServer } from "ws";
-import { WS_PORT, WS_HOST, HELLO_DEADLINE_MS, BRIDGE_TOKEN } from "./config.js";
+import { WS_PORT, WS_HOST, HELLO_DEADLINE_MS, BRIDGE_TOKEN, SERVER_VERSION, PROTOCOL_VERSION } from "./config.js";
 import { log }                        from "./log.js";
 import { pendingRequests }            from "./foundry-rpc.js";
 
@@ -176,6 +176,19 @@ export function startBridgeServer() {
         });
         const hostStr = host ? ` @ ${host}` : "";
         log(`Bridge registered: ${userName}${hostStr} (${userId}) [${isGM ? "GM" : "player"}]`);
+
+        // Announce our version back to the module. The module compares this
+        // against its own and warns the user (in the Foundry UI) if the server
+        // is out of date — the only update signal the headless server has.
+        // A module talking to an OLDER server gets no hello-ack at all, which
+        // the module also treats as "server outdated".
+        try {
+          socket.send(JSON.stringify({
+            type: "hello-ack",
+            serverVersion: SERVER_VERSION,
+            protocolVersion: PROTOCOL_VERSION,
+          }));
+        } catch { /* socket may have closed; ignore */ }
 
         // If reload_foundry (or anyone else) is waiting for this user to
         // (re)connect, resolve their promise.

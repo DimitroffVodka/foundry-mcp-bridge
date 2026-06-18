@@ -110,12 +110,20 @@ trace_workflow({
   "preset": "midi-full",
   "watch":  ["Goblin"],
   "trigger": {
-    "tool": "request_item_use",
-    "params": { "actor": "Sassafrass", "item": "Longsword", "targets": ["Goblin"] }
-  }
-})
+    "tool": "use_item",                 // MUST be use_item for Midi presets — it
+    "params": { "actor": "Sassafrass", "item": "Longsword" }  // calls item.use(),
+  }                                      // which Midi patches. request_item_use
+})                                       // bypasses Midi (no midi-qol.* hooks).
 // → { preset, hooks, timeline:[{dt,hook,args}…], diff:[{path:"system.attributes.hp.value", before:7, after:1}], summary }
 ```
+
+> **Trigger gotcha (verified on Midi v14).** `request_item_use` runs a direct
+> attack/damage dispatcher that *bypasses* Midi-QOL entirely — useful for
+> deterministic combat, useless for tracing a Midi workflow (zero `midi-qol.*`
+> hooks fire). Always trigger Midi presets with `use_item`. Also: Midi must be
+> set to auto-roll (`ConfigSettings.gmAutoAttack` / `gmAutoDamage` / `autoCheckHit`
+> / `autoApplyDamage`), or `item.use()` parks at the manual attack-roll step and
+> the trace captures only `preTargeting` + `preItemRoll` before timing out.
 
 > **Concurrency note.** `trace_workflow` fires `trigger` ~150ms after opening the
 > window (`triggerDelayMs`) so listeners are live first. If a workflow's first

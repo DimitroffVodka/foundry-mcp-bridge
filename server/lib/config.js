@@ -2,6 +2,25 @@
  * Centralized config — env-var-driven ports + tunable timeouts/deadlines.
  * Imported by both bridge management and MCP transport layers.
  */
+import { readFileSync } from "node:fs";
+
+// Server version — single source of truth is server/package.json, so a
+// `git pull` that bumps the package version is automatically reflected here
+// (and announced to the Foundry module in the hello-ack).
+let _serverVersion = "0.0.0";
+try {
+  _serverVersion = JSON.parse(
+    readFileSync(new URL("../package.json", import.meta.url), "utf8")
+  ).version || _serverVersion;
+} catch { /* keep fallback */ }
+export const SERVER_VERSION = _serverVersion;
+
+// Wire-protocol version. Bump ONLY when the module↔server contract changes in
+// a breaking way (new required handshake field, renamed tool semantics, etc.)
+// — NOT on every release. The module compares this against its own and warns
+// the user in the Foundry UI when the server is too old to talk to it.
+export const PROTOCOL_VERSION = 1;
+
 export const WS_PORT          = parseInt(process.env.FOUNDRY_WS_PORT  ?? "3001", 10);
 export const WS_HOST          = process.env.FOUNDRY_WS_HOST ?? "127.0.0.1";
 export const HTTP_PORT        = parseInt(process.env.FOUNDRY_MCP_PORT ?? "3000", 10);
