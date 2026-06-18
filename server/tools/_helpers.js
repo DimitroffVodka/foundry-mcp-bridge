@@ -65,3 +65,37 @@ export function registerRawTool(mcp, name, desc, schema, callback) {
   noteTrackedTool(mcp, name);
   return upsertTool(mcp, name, desc, schema, callback);
 }
+
+/**
+ * Register a tool that merges several same-domain bridge handlers behind one
+ * discriminator enum. Dispatches to the existing bridge handler named in
+ * actionMap. Server-side only — the bridge handlers are unchanged.
+ *
+ * @param {string} [key="action"]  the param used as the discriminator. The
+ *   forwarded `rest` strips this key plus `targetUser`. Defaults to "action"
+ *   so existing callers that omit it are unaffected.
+ * @param {Object<string,string[]>} [requiredByAction={}]  per-discriminator
+ *   list of param names that are required for that mode. A flat merged schema
+ *   can't mark a param required for only some actions, so those params are
+ *   `.optional()` at the schema level; this restores strict validation by
+ *   rejecting an action that's missing its required params with a clear
+ *   tool-level error (instead of a murkier bridge-layer error later).
+ */
+export function registerMergedTool(mcp, name, desc, schema, actionMap, key = "action", requiredByAction = {}) {
+  const augmented = { ...schema, targetUser: z.string().optional().describe(TARGET_USER_DESC) };
+  noteTrackedTool(mcp, name);
+  return upsertTool(mcp, name, desc, augmented, async (params) => {
+    const { [key]: discriminator, targetUser, ...rest } = params;
+    const bridgeTool = actionMap[discriminator];
+    if (!bridgeTool) {
+      return { content: [{ type: "text", text:
+        `Error: unknown ${key} "${discriminator}" for ${name}. Valid: ${Object.keys(actionMap).join(", ")}.` }] };
+    }
+    const missing = (requiredByAction[discriminator] || []).filter(p => rest[p] === undefined || rest[p] === null);
+    if (missing.length) {
+      return { content: [{ type: "text", text:
+        `Error: ${name} ${key}="${discriminator}" requires: ${missing.join(", ")}.` }] };
+    }
+    return callFoundry(bridgeTool, rest, targetUser);
+  });
+}

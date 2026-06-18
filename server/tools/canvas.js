@@ -11,7 +11,7 @@
  */
 import { z }                                from "zod";
 import { registerRoutedTool, registerRawTool, TARGET_USER_DESC, AUDIT_DESC } from "./_helpers.js";
-import { callFoundryImage }                 from "../lib/foundry-rpc.js";
+import { callFoundry, callFoundryImage }    from "../lib/foundry-rpc.js";
 
 export function registerCanvasTools(mcp) {
   // --- Scene + token query ---
@@ -28,31 +28,31 @@ export function registerCanvasTools(mcp) {
     "linked actor data, and active status conditions.",
     { token: z.string().describe("Token id, token name, or linked actor name on the active scene.") });
 
-  // --- Token mutation ---
-  registerRoutedTool(mcp, "move_token",
-    "Move a token to (x, y) on the active scene. Optionally disable animation for instant placement.",
-    {
-      token:   z.string().describe("Token id, token name, or linked actor name."),
-      x:       z.number().describe("Target x coordinate (scene pixels)."),
-      y:       z.number().describe("Target y coordinate (scene pixels)."),
-      animate: z.boolean().optional().describe("Animate movement. Default true."),
-      audit:   z.boolean().optional().describe(AUDIT_DESC),
-    });
-
-  registerRoutedTool(mcp, "move_token_pathed",
-    "Move a token to (x, y) using A* pathfinding against scene walls on the active scene. " +
-    "Falls back to a plain teleport if no polygon backend is available. Set canOpenDoors=true " +
-    "to have the token open closed doors along the path (their wall ids are returned in doorsOpened). " +
-    "Only the final waypoint animates; intermediate hops teleport. Returns pathCost when pathfinding runs.",
+  // --- Token mutation (merged: move_token, move_token_pathed) ---
+  registerRawTool(mcp, "move_token",
+    "Move a token to (x, y) on the active scene. "
+    + "Default (pathed=false): straight move to (x, y); optionally disable animation for instant placement. "
+    + "pathed=true: A* pathfinding against scene walls (routes to move_token_pathed) — falls back to a plain "
+    + "teleport if no polygon backend is available. Set canOpenDoors=true to open closed doors along the path "
+    + "(their wall ids are returned in doorsOpened). Only the final waypoint animates; intermediate hops "
+    + "teleport. Returns pathCost when pathfinding runs. The canOpenDoors/elevation/rotation params apply only "
+    + "to pathed=true.",
     {
       token:        z.string().describe("Token id, token name, or linked actor name."),
       x:            z.number().describe("Target x coordinate (scene pixels)."),
       y:            z.number().describe("Target y coordinate (scene pixels)."),
-      animate:      z.boolean().optional().describe("Animate the final hop. Default true."),
-      canOpenDoors: z.boolean().optional().describe("Open closed doors along the path. Default false."),
-      elevation:    z.number().optional().describe("Applied to the final waypoint."),
-      rotation:     z.number().optional().describe("Applied to the final waypoint."),
-      audit:        z.boolean().optional().describe("Return an audit block with before/after diffs and undo instructions."),
+      animate:      z.boolean().optional().describe("Animate movement. Default true. (pathed=true: animates only the final hop.)"),
+      pathed:       z.boolean().optional().describe("Use A* pathfinding against scene walls (routes to move_token_pathed). Default false."),
+      canOpenDoors: z.boolean().optional().describe("[pathed=true] Open closed doors along the path. Default false."),
+      elevation:    z.number().optional().describe("[pathed=true] Applied to the final waypoint."),
+      rotation:     z.number().optional().describe("[pathed=true] Applied to the final waypoint."),
+      audit:        z.boolean().optional().describe(AUDIT_DESC),
+      targetUser:   z.string().optional().describe(TARGET_USER_DESC),
+    },
+    async (params) => {
+      const { targetUser, pathed = false, ...rest } = params;
+      const bridgeTool = pathed === true ? "move_token_pathed" : "move_token";
+      return callFoundry(bridgeTool, rest, targetUser);
     });
 
   registerRoutedTool(mcp, "update_token",
@@ -117,53 +117,54 @@ export function registerCanvasTools(mcp) {
       elevation: z.number().optional().describe("Elevation in Foundry units; picks the level whose [bottom, top] contains it."),
     });
 
-  // --- Image-returning tools (Type B: manual targetUser injection) ---
+  // --- Image-returning tool (Type B: manual targetUser injection) ---
+  // Merged: screenshot (canvas), screenshot_dom (dom), capture_scene (scene_grid).
+  // All three return MCP image content via callFoundryImage, so this uses a
+  // custom callback rather than registerMergedTool (which returns text only).
   registerRawTool(mcp, "screenshot",
-    "Capture the live Foundry PIXI game canvas (map + tokens) as an image. " +
-    "Downscaled JPEG by default to keep payloads small. Does NOT capture " +
-    "DOM overlays like sheets or HUD elements — only the game canvas itself.",
+    "Capture a Foundry image. The `target` selects what to capture and which params apply:\n"
+    + "• target 'canvas' (default) → the live PIXI game canvas (map + tokens) as a downscaled JPEG. "
+    + "Uses scale (0.1–1.0, default 0.5), quality (0.1–1.0, default 0.7), format ('jpeg'|'png', default 'jpeg'). "
+    + "Does NOT capture DOM overlays (sheets/HUD).\n"
+    + "• target 'dom' → a DOM element (character sheets, HUD, chat cards, app windows) via html2canvas. "
+    + "Uses selector (CSS, default 'body'), scale (default 0.75), quality (default 0.8), format ('png'|'jpeg', "
+    + "default 'png'). Fills the gap 'canvas' can't — PIXI-only never captures DOM. html2canvas loads lazily "
+    + "from a CDN on first use.\n"
+    + "• target 'scene_grid' → the active scene canvas as a base64 WebP with a coordinate grid overlay "
+    + "(gx,gy labels per cell), useful for spatial reasoning. Takes no extra capture params.",
     {
-      scale:   z.number().optional().describe("Resize factor (0.1–1.0). Default 0.5."),
-      quality: z.number().optional().describe("JPEG quality (0.1–1.0). Default 0.7. Ignored for PNG."),
-      format:  z.enum(["jpeg", "png"]).optional().describe("Output format. Default 'jpeg'."),
+      target:   z.enum(["canvas", "dom", "scene_grid"]).optional().describe(
+        "What to capture: 'canvas' (PIXI game canvas, default), 'dom' (a DOM element via html2canvas), "
+        + "or 'scene_grid' (scene canvas with a coordinate grid overlay)."),
+      scale:    z.number().optional().describe("[canvas/dom] Resize factor (0.1–1.0). Default 0.5 (canvas) / 0.75 (dom)."),
+      quality:  z.number().optional().describe("[canvas/dom] JPEG quality (0.1–1.0). Default 0.7 (canvas) / 0.8 (dom). Ignored for PNG."),
+      format:   z.enum(["jpeg", "png"]).optional().describe("[canvas/dom] Output format. Default 'jpeg' (canvas) / 'png' (dom)."),
+      selector: z.string().optional().describe("[dom] CSS selector of the element to capture. Default: 'body'."),
       targetUser: z.string().optional().describe(TARGET_USER_DESC),
     },
     async (p) => {
-      const { targetUser, ...toolParams } = p;
+      const { target = "canvas", targetUser, selector, scale, quality, format } = p;
+      if (target === "dom") {
+        const toolParams = {};
+        if (selector !== undefined) toolParams.selector = selector;
+        if (scale    !== undefined) toolParams.scale    = scale;
+        if (quality  !== undefined) toolParams.quality  = quality;
+        if (format   !== undefined) toolParams.format   = format;
+        return callFoundryImage("screenshot_dom", toolParams,
+          d => `DOM screenshot of \`${d.selector}\` (${d.element.tag}${d.element.id ? "#"+d.element.id : ""}) — ${d.width}×${d.height} ${d.mimeType}`,
+          targetUser);
+      }
+      if (target === "scene_grid") {
+        return callFoundryImage("capture_scene", {},
+          d => `Scene "${d.sceneName}" [${d.sceneId}] — ${d.width}×${d.height} ${d.mimeType} with grid overlay`,
+          targetUser);
+      }
+      // target === "canvas"
+      const toolParams = {};
+      if (scale   !== undefined) toolParams.scale   = scale;
+      if (quality !== undefined) toolParams.quality = quality;
+      if (format  !== undefined) toolParams.format  = format;
       return callFoundryImage("screenshot", toolParams,
         d => `Canvas screenshot — ${d.width}×${d.height} ${d.mimeType}`, targetUser);
-    });
-
-  registerRawTool(mcp, "screenshot_dom",
-    "Screenshot a DOM element (character sheets, HUD, chat cards, app windows) via html2canvas. " +
-    "Fills the gap that `screenshot` can't — `screenshot` is PIXI-only and never captures DOM. " +
-    "Pass a CSS selector; defaults to `body`. Good for UI/layout comparison and sheet debugging. " +
-    "html2canvas is loaded lazily from a CDN on first use.",
-    {
-      selector: z.string().optional().describe("CSS selector of the element to capture. Default: 'body'."),
-      scale:    z.number().optional().describe("Resize factor (0.1–1.0). Default 0.75."),
-      quality:  z.number().optional().describe("JPEG quality (0.1–1.0). Default 0.8. Ignored for PNG."),
-      format:   z.enum(["png", "jpeg"]).optional().describe("Output format. Default 'png' (better for UI)."),
-      targetUser: z.string().optional().describe(TARGET_USER_DESC),
-    },
-    async (p) => {
-      const { targetUser, ...toolParams } = p;
-      return callFoundryImage("screenshot_dom", toolParams,
-        d => `DOM screenshot of \`${d.selector}\` (${d.element.tag}${d.element.id ? "#"+d.element.id : ""}) — ${d.width}×${d.height} ${d.mimeType}`,
-        targetUser);
-    });
-
-  registerRawTool(mcp, "capture_scene",
-    "Capture the active scene canvas as a base64 WebP with a coordinate grid overlay (gx,gy labels " +
-    "per cell). Useful for spatial reasoning — lets the model see which grid cell each token sits in. " +
-    "Distinct from `screenshot`, which is a plain JPEG with no overlay.",
-    {
-      targetUser: z.string().optional().describe(TARGET_USER_DESC),
-    },
-    async (p) => {
-      const { targetUser } = p;
-      return callFoundryImage("capture_scene", {},
-        d => `Scene "${d.sceneName}" [${d.sceneId}] — ${d.width}×${d.height} ${d.mimeType} with grid overlay`,
-        targetUser);
     });
 }

@@ -1,44 +1,18 @@
 /**
- * Snapshot + diff tools — four flavors:
+ * Snapshot + diff tools — two flavors:
  *
- *   - `snapshot_actor`  — single actor, full toObject() with optional scope
- *   - `diff_actor`      — diff two actor snapshots (or snapshot vs live)
  *   - `snapshot_actors` — multi-actor + path-selector projection (live walk)
  *   - `diff_with`       — re-snapshot + diff against stored or inline snapshot
  *
- * The first two are simple proxies. The latter two have non-trivial server-
- * side logic (storeId persistence + diff orchestration) and live here.
+ * Both have non-trivial server-side logic (storeId persistence + diff
+ * orchestration) and live here.
  */
 import { z }                                from "zod";
-import { registerRoutedTool, registerRawTool } from "./_helpers.js";
+import { registerRawTool }                  from "./_helpers.js";
 import { requestFoundry }                   from "../lib/foundry-rpc.js";
 import { snapshotStore, pruneSnapshotStore, diffProjections } from "../lib/snapshot-store.js";
 
 export function registerSnapshotTools(mcp) {
-  // --- Single-actor snapshot/diff (simple proxies) ---
-  registerRoutedTool(mcp, "snapshot_actor",
-    "Snapshot an actor's current state as plain JSON for later diffing. " +
-    "Optional `scope` array limits which sections to include: 'system', 'flags', " +
-    "'items', 'effects', 'prototypeToken'. Default is everything except prototypeToken. " +
-    "Pass the result to diff_actor after performing an action to verify the change footprint.",
-    {
-      actor: z.string().describe("Actor id or name."),
-      scope: z.array(z.enum(["system","flags","items","effects","prototypeToken"]))
-              .optional().describe("Limit which sections to snapshot."),
-    });
-
-  registerRoutedTool(mcp, "diff_actor",
-    "Compute the structural delta between two actor snapshots (or between a " +
-    "snapshot and the actor's current live state). Arrays whose elements have " +
-    "`_id` are matched by id, so reordering does not register as a change. " +
-    "Returns { total, summary: {added, removed, changed}, changes: [{path, op, before, after}] }. " +
-    "Two modes: pass `{before, after}` as JSON, OR pass `{actor, before}` to diff a snapshot against current state.",
-    {
-      before: z.any().describe("The earlier snapshot (from snapshot_actor)."),
-      after:  z.any().optional().describe("The later snapshot. Omit to diff against the actor's live state via `actor`."),
-      actor:  z.string().optional().describe("Actor id/name. Use with `before` to diff snapshot vs current state."),
-    });
-
   // --- Multi-actor snapshot + diff (server-side orchestration) ---
   registerRawTool(mcp, "snapshot_actors",
     "Capture structured projections of one or more actors at specific paths "

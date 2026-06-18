@@ -11,7 +11,7 @@
  * browser context with that user's permissions.
  */
 import { z }                                     from "zod";
-import { registerRoutedTool, registerRawTool, TARGET_USER_DESC, AUDIT_DESC } from "./_helpers.js";
+import { registerRoutedTool, registerRawTool, registerMergedTool, TARGET_USER_DESC, AUDIT_DESC } from "./_helpers.js";
 import { callFoundry }                           from "../lib/foundry-rpc.js";
 import { ALLOW_SELF_TEST, ALLOW_WRITE }          from "../lib/config.js";
 
@@ -30,100 +30,169 @@ export function registerWorldAuthoringTools(mcp) {
       });
   }
 
-  // --- Folders ---
-  registerRoutedTool(mcp, "create_folder",
-    "Create a folder in the Foundry sidebar. Idempotent — if a folder with "
-    + "the same `type` + `name` + `parentFolder` already exists, returns it "
-    + "instead of creating a duplicate (`existed: true` in the response). "
-    + "Use this to organize actors/items/journals created by subsequent calls.",
+  // --- Folders (merged: create_folder, delete_folder) ---
+  registerMergedTool(mcp, "folder",
+    "Create or delete a Foundry sidebar folder. "
+    + "action 'create' needs type+name (parentFolder/color optional; idempotent — "
+    + "returns an existing folder with the same type+name+parentFolder as `existed: true`). "
+    + "action 'delete' needs folderId (deleteContents optional — when true also deletes "
+    + "contained documents/subfolders, else they are orphaned). Permanent on delete.",
     {
+      action: z.enum(["create", "delete"]).describe("Folder operation to perform."),
+      // create
       type:         z.enum(["Actor", "Item", "JournalEntry", "Scene", "Macro", "Playlist", "RollTable", "Cards"])
-                      .describe("Sidebar document type the folder will hold."),
-      name:         z.string().describe("Folder name (case-sensitive)."),
+                      .optional().describe("[create] Sidebar document type the folder will hold."),
+      name:         z.string().optional().describe("[create] Folder name (case-sensitive)."),
       parentFolder: z.string().optional().describe(
-        "Optional parent folder. Accepts a folder document id or an exact "
+        "[create] Optional parent folder. Accepts a folder document id or an exact "
         + "name match within the same `type`."
       ),
       color:        z.string().optional().describe(
-        "Optional hex color (e.g. '#3a5'). Foundry shows this on the folder header."
+        "[create] Optional hex color (e.g. '#3a5'). Foundry shows this on the folder header."
+      ),
+      // delete
+      folderId:       z.string().optional().describe("[delete] Folder document id."),
+      deleteContents: z.boolean().optional().describe(
+        "[delete] If true, delete all contained documents and subfolders too. Default false (orphan)."
       ),
       audit:        z.boolean().optional().describe(AUDIT_DESC),
-    });
+    },
+    { create: "create_folder", delete: "delete_folder" },
+    "action",
+    { create: ["type", "name"], delete: ["folderId"] });
 
-  // --- Actor from compendium ---
-  registerRoutedTool(mcp, "create_actor_from_compendium",
-    "Import an actor from a compendium pack into the world. Use this when "
-    + "the target creature is already statted (monster manuals, NPC libraries, "
-    + "homebrew compendiums). Use `search_compendium` or "
-    + "`get_compendium_document` first to find the document id.",
+  // --- Actor write (merged: create_actor, create_actor_from_compendium, update_actor, delete_actor) ---
+  registerMergedTool(mcp, "actor_write",
+    "Create, import, update, or delete a world actor. "
+    + "action 'create' needs name+type (system/items/img/prototypeToken/folderId/folderName optional) — "
+    + "builds a new actor from scratch; call get_data_model first to learn the system block shape. "
+    + "action 'fromCompendium' needs pack+documentId (folderId/folderName/nameOverride optional) — "
+    + "imports an already-statted actor from a compendium pack. "
+    + "action 'update' needs actorId plus at least one of name/img/system/prototypeToken — patches an actor. "
+    + "action 'delete' needs actorId — permanent (Foundry's undo does not cover deletes).",
     {
-      pack:         z.string().describe("Compendium pack id (e.g. 'dnd5e.monsters')."),
-      documentId:   z.string().describe("Document id within the pack."),
-      folderId:     z.string().optional().describe("Target folder document id (wins over folderName if both given)."),
-      folderName:   z.string().optional().describe(
-        "Target folder by exact name. Auto-created as an Actor folder if it doesn't exist."
-      ),
-      nameOverride: z.string().optional().describe("Rename the imported actor."),
-      audit:        z.boolean().optional().describe(AUDIT_DESC),
-    });
-
-  // --- Actor from scratch ---
-  registerRoutedTool(mcp, "create_actor",
-    "Create a brand-new actor in the world from scratch. System-agnostic — "
-    + "the `system` parameter is the system-specific data block and you should "
-    + "call `get_data_model` first to learn its shape for the active system. "
-    + "Use this for custom NPCs/monsters that aren't in any compendium. For "
-    + "actors that ARE in a compendium, prefer `create_actor_from_compendium`.",
-    {
-      name:           z.string().describe("Actor name."),
-      type:           z.string().describe(
-        "Actor subtype, system-specific (e.g. 'character', 'npc' for dnd5e; "
+      action: z.enum(["create", "fromCompendium", "update", "delete"]).describe("Actor operation to perform."),
+      // shared id (update/delete)
+      actorId:        z.string().optional().describe("[update/delete] Actor document id."),
+      // create
+      name:           z.string().optional().describe("[create] Actor name. [update] Replace the actor's name."),
+      type:           z.string().optional().describe(
+        "[create] Actor subtype, system-specific (e.g. 'character', 'npc' for dnd5e; "
         + "'Player' for shadowdark). Use `get_data_model({type: 'Actor'})` "
         + "to see valid types in the active system."
       ),
       system:         z.record(z.string(), z.any()).optional().describe(
-        "System-specific data block. Shape varies per game system. "
-        + "Use `get_data_model({type: 'Actor', subtype: '<type>'})` to learn the structure."
+        "[create] System-specific data block. Shape varies per game system. "
+        + "Use `get_data_model({type: 'Actor', subtype: '<type>'})` to learn the structure. "
+        + "[update] Merge into the actor's `system` data."
       ),
       items:          z.array(z.record(z.string(), z.any())).optional().describe(
-        "Optional inline items to attach at creation. Each entry is either "
+        "[create] Optional inline items to attach at creation. Each entry is either "
         + "{ pack, documentId, nameOverride? } (from a compendium) or "
         + "{ name, type, system, ... } (inline definition)."
       ),
-      img:            z.string().optional().describe("Portrait image path/URL."),
+      img:            z.string().optional().describe("[create] Portrait image path/URL. [update] Replace the portrait image path/URL."),
       prototypeToken: z.record(z.string(), z.any()).optional().describe(
-        "Optional prototype token data (img, scale, disposition, etc.)."
+        "[create] Optional prototype token data (img, scale, disposition, etc.). "
+        + "[update] Merge into the prototype token (affects future tokens placed from this actor)."
       ),
-      folderId:       z.string().optional().describe("Target folder id."),
+      folderId:       z.string().optional().describe("[create/fromCompendium] Target folder id (wins over folderName if both given)."),
       folderName:     z.string().optional().describe(
-        "Target folder by exact name. Auto-created as an Actor folder if it doesn't exist."
+        "[create/fromCompendium] Target folder by exact name. Auto-created as an Actor folder if it doesn't exist."
       ),
+      // fromCompendium
+      pack:           z.string().optional().describe("[fromCompendium] Compendium pack id (e.g. 'dnd5e.monsters')."),
+      documentId:     z.string().optional().describe("[fromCompendium] Document id within the pack."),
+      nameOverride:   z.string().optional().describe("[fromCompendium] Rename the imported actor."),
       audit:          z.boolean().optional().describe(AUDIT_DESC),
+    },
+    {
+      create:         "create_actor",
+      fromCompendium: "create_actor_from_compendium",
+      update:         "update_actor",
+      delete:         "delete_actor",
+    },
+    "action",
+    {
+      create:         ["name", "type"],
+      fromCompendium: ["pack", "documentId"],
+      update:         ["actorId"],
+      delete:         ["actorId"],
     });
 
-  // --- Add items to existing actor ---
-  registerRoutedTool(mcp, "add_items_to_actor",
-    "Add items (weapons, spells, gear, features — any embedded Item document) "
-    + "to an existing actor. Items can be sourced from a compendium pack or "
-    + "defined inline. Useful after `create_actor_from_compendium` for "
-    + "customizing a base creature without altering the source pack.",
+  // --- Actor items (merged: add_items_to_actor, update_item_on_actor, delete_items_from_actor) ---
+  registerMergedTool(mcp, "actor_items",
+    "Manage embedded items (weapons, spells, gear, features) on an existing actor. "
+    + "action 'add' needs actorId+items — items are { pack, documentId, nameOverride? } "
+    + "(compendium ref) OR { name, type, system?, ... } (inline). "
+    + "action 'update' needs actorId+itemId+data — merges `data` into one embedded item. "
+    + "action 'delete' needs actorId+itemIds — removes embedded items by id (missing ones reported).",
     {
+      action: z.enum(["add", "update", "delete"]).describe("Actor-item operation to perform."),
       actorId: z.string().describe("Actor document id."),
-      items:   z.array(z.record(z.string(), z.any())).describe(
-        "Items to add. Each entry is { pack, documentId, nameOverride? } "
+      // add
+      items:   z.array(z.record(z.string(), z.any())).optional().describe(
+        "[add] Items to add. Each entry is { pack, documentId, nameOverride? } "
         + "(compendium ref) OR { name, type, system?, ... } (inline)."
       ),
+      // update
+      itemId:  z.string().optional().describe("[update] Embedded item id."),
+      data:    z.record(z.string(), z.any()).optional().describe(
+        "[update] Fields to merge into the item. Foundry's diff-update semantics apply."
+      ),
+      // delete
+      itemIds: z.array(z.string()).optional().describe("[delete] Embedded item ids to remove."),
       audit:   z.boolean().optional().describe(AUDIT_DESC),
+    },
+    {
+      add:    "add_items_to_actor",
+      update: "update_item_on_actor",
+      delete: "delete_items_from_actor",
+    },
+    "action",
+    {
+      add:    ["actorId", "items"],
+      update: ["actorId", "itemId", "data"],
+      delete: ["actorId", "itemIds"],
     });
 
-  // --- Journal entry ---
-  registerRoutedTool(mcp, "create_journal_entry",
-    "Create a journal entry with one or more pages. Pages default to type "
-    + "'text' with HTML format. Use this to build quest journals, session "
-    + "notes, encounter writeups, etc. Page ids are returned so you can "
-    + "iterate with `update_journal_page` later.",
+  // --- Actor ownership (merged: get_actor_ownership, set_actor_ownership) ---
+  registerMergedTool(mcp, "actor_ownership",
+    "Read or set an actor's ownership map. "
+    + "action 'get' needs actorId — returns level names (NONE/LIMITED/OBSERVER/OWNER) "
+    + "and resolved Foundry user names. "
+    + "action 'set' needs actorId+ownership — a map of user → level MERGED with existing "
+    + "ownership (to clear a user, pass them as NONE explicitly).",
     {
-      name:       z.string().describe("Journal entry name (shown in the sidebar)."),
+      action: z.enum(["get", "set"]).describe("Ownership operation to perform."),
+      actorId:   z.string().describe("Actor document id."),
+      ownership: z.record(z.string(), z.union([
+        z.enum(["NONE", "LIMITED", "OBSERVER", "OWNER", "INHERIT"]),
+        z.number().int().min(-1).max(3)
+      ])).optional().describe(
+        "[set] Map of user → level. Keys can be `default`, a userId, or an exact "
+        + "case-sensitive userName. Levels are strings (NONE/LIMITED/OBSERVER/OWNER/INHERIT) "
+        + "or integers (0/1/2/3/-1). Example: { default: \"NONE\", \"Bob\": \"OWNER\" }."
+      ),
+      audit:     z.boolean().optional().describe(AUDIT_DESC),
+    },
+    { get: "get_actor_ownership", set: "set_actor_ownership" },
+    "action",
+    { get: ["actorId"], set: ["actorId", "ownership"] });
+
+  // --- Journal (merged: create_journal_entry, add_page_to_journal_entry, update_journal_page, delete_journal_page, delete_journal_entry) ---
+  registerMergedTool(mcp, "journal",
+    "Manage journal entries and their pages. "
+    + "action 'create' needs name+pages (folderId/folderName optional) — creates an entry with pages. "
+    + "action 'addPage' needs journalId+page — appends a page to an existing entry. "
+    + "action 'updatePage' needs journalId+pageId (name/content/appendContent optional) — "
+    + "use `content` to replace the body or `appendContent` to add to it. "
+    + "action 'deletePage' needs journalId+pageId — deletes one page; the entry remains. "
+    + "action 'delete' needs journalId — deletes the entry and all its pages (permanent).",
+    {
+      action: z.enum(["create", "addPage", "updatePage", "deletePage", "delete"]).describe("Journal operation to perform."),
+      // create
+      name:       z.string().optional().describe("[create] Journal entry name (shown in the sidebar). [updatePage] Replace the page name."),
       pages:      z.array(z.object({
         name:   z.string().describe("Page name (shown in the entry's page list)."),
         type:   z.enum(["text", "image", "pdf", "video"]).optional().describe("Default 'text'."),
@@ -134,121 +203,16 @@ export function registerWorldAuthoringTools(mcp) {
           )
         }).optional(),
         src:    z.string().optional().describe("URL/path for image/pdf/video pages."),
-      })).describe("At least one page."),
-      folderId:   z.string().optional().describe("Target folder id."),
+      })).optional().describe("[create] At least one page."),
+      folderId:   z.string().optional().describe("[create] Target folder id."),
       folderName: z.string().optional().describe(
-        "Target folder by exact name. Auto-created as a JournalEntry folder if missing."
+        "[create] Target folder by exact name. Auto-created as a JournalEntry folder if missing."
       ),
-      audit:      z.boolean().optional().describe(AUDIT_DESC),
-    });
-
-  // --- Update journal page ---
-  registerRoutedTool(mcp, "update_journal_page",
-    "Update a journal page's name and/or text content. Use `content` to "
-    + "replace the body wholesale; use `appendContent` to add to the existing "
-    + "body without losing it. Designed for iterative writing — first pass "
-    + "creates a skeleton, follow-up calls append richer narrative.",
-    {
-      journalId:     z.string().describe("Parent journal entry id."),
-      pageId:        z.string().describe("Page id within that journal."),
-      name:          z.string().optional().describe("Replace the page name."),
-      content:       z.string().optional().describe("Replace the page body (HTML or Markdown per the page's format)."),
-      appendContent: z.string().optional().describe("Append to the existing page body. Ignored if `content` is also provided."),
-      audit:         z.boolean().optional().describe(AUDIT_DESC),
-    });
-
-  // --- Delete: folder ---
-  registerRoutedTool(mcp, "delete_folder",
-    "Delete a folder by id. Foundry orphans contained documents by default "
-    + "(sets their folder to null). Pass `deleteContents: true` to also "
-    + "delete every document and subfolder inside. Permanent — Foundry's "
-    + "undo doesn't cover deletes.",
-    {
-      folderId:       z.string().describe("Folder document id."),
-      deleteContents: z.boolean().optional().describe(
-        "If true, delete all contained documents and subfolders too. Default false (orphan)."
-      ),
-      audit:          z.boolean().optional().describe(AUDIT_DESC),
-    });
-
-  // --- Delete: actor ---
-  registerRoutedTool(mcp, "delete_actor",
-    "Delete an actor by id. Permanent — Foundry's undo doesn't cover document "
-    + "deletion. If any data on the actor needs to survive, call `get_actor` "
-    + "or `snapshot_actor` first.",
-    {
-      actorId: z.string().describe("Actor document id."),
-      audit:   z.boolean().optional().describe(AUDIT_DESC),
-    });
-
-  // --- Update: actor ---
-  registerRoutedTool(mcp, "update_actor",
-    "Patch an existing actor's top-level fields and/or system data. Use this "
-    + "to tweak HP/stats/name/img/portrait after `create_actor_from_compendium` "
-    + "instead of recreating the actor from scratch. At least one of `name`, "
-    + "`img`, `system`, or `prototypeToken` is required.",
-    {
-      actorId:        z.string().describe("Actor document id."),
-      name:           z.string().optional().describe("Replace the actor's name."),
-      img:            z.string().optional().describe("Replace the portrait image path/URL."),
-      system:         z.record(z.string(), z.any()).optional().describe(
-        "Merge into the actor's `system` data. Use `get_data_model` for the active system's shape."
-      ),
-      prototypeToken: z.record(z.string(), z.any()).optional().describe(
-        "Merge into the prototype token (affects future tokens placed from this actor)."
-      ),
-      audit:          z.boolean().optional().describe(AUDIT_DESC),
-    });
-
-  // --- Items on actor: delete ---
-  registerRoutedTool(mcp, "delete_items_from_actor",
-    "Remove embedded items from an actor by id. Items not on the actor are "
-    + "returned in `missing`; the rest are deleted.",
-    {
-      actorId: z.string().describe("Actor document id."),
-      itemIds: z.array(z.string()).describe("Embedded item ids to remove."),
-      audit:   z.boolean().optional().describe(AUDIT_DESC),
-    });
-
-  // --- Items on actor: update ---
-  registerRoutedTool(mcp, "update_item_on_actor",
-    "Patch a single embedded item on an actor. `data` is merged into the "
-    + "item document — top-level fields like `name`, `img`, and "
-    + "`system.*` sub-paths are all accepted.",
-    {
-      actorId: z.string().describe("Actor document id."),
-      itemId:  z.string().describe("Embedded item id."),
-      data:    z.record(z.string(), z.any()).describe(
-        "Fields to merge into the item. Foundry's diff-update semantics apply."
-      ),
-      audit:   z.boolean().optional().describe(AUDIT_DESC),
-    });
-
-  // --- Delete: journal entry ---
-  registerRoutedTool(mcp, "delete_journal_entry",
-    "Delete a journal entry and all of its pages. Permanent — Foundry's "
-    + "undo doesn't cover document deletion.",
-    {
-      journalId: z.string().describe("Journal entry document id."),
-      audit:     z.boolean().optional().describe(AUDIT_DESC),
-    });
-
-  // --- Delete: journal page ---
-  registerRoutedTool(mcp, "delete_journal_page",
-    "Delete a single page from a journal entry. The entry itself remains.",
-    {
-      journalId: z.string().describe("Parent journal entry id."),
-      pageId:    z.string().describe("Page id to delete."),
-      audit:     z.boolean().optional().describe(AUDIT_DESC),
-    });
-
-  // --- Add page to journal entry ---
-  registerRoutedTool(mcp, "add_page_to_journal_entry",
-    "Add a new page to an existing journal entry. Page shape matches the "
-    + "entries in `create_journal_entry`'s `pages[]`.",
-    {
-      journalId: z.string().describe("Parent journal entry id."),
-      page:      z.object({
+      // page-level ops
+      journalId:  z.string().optional().describe("[addPage/updatePage/deletePage/delete] Parent journal entry id."),
+      pageId:     z.string().optional().describe("[updatePage/deletePage] Page id within that journal."),
+      // addPage
+      page:       z.object({
         name:    z.string().describe("Page name."),
         type:    z.enum(["text", "image", "pdf", "video"]).optional().describe("Default 'text'."),
         text:    z.object({
@@ -256,8 +220,26 @@ export function registerWorldAuthoringTools(mcp) {
           format:  z.union([z.literal(1), z.literal(2)]).optional(),
         }).optional(),
         src:     z.string().optional().describe("URL/path for image/pdf/video pages."),
-      }).describe("Page to add."),
-      audit:     z.boolean().optional().describe(AUDIT_DESC),
+      }).optional().describe("[addPage] Page to add (shape matches a create `pages[]` entry)."),
+      // updatePage
+      content:       z.string().optional().describe("[updatePage] Replace the page body (HTML or Markdown per the page's format)."),
+      appendContent: z.string().optional().describe("[updatePage] Append to the existing page body. Ignored if `content` is also provided."),
+      audit:      z.boolean().optional().describe(AUDIT_DESC),
+    },
+    {
+      create:     "create_journal_entry",
+      addPage:    "add_page_to_journal_entry",
+      updatePage: "update_journal_page",
+      deletePage: "delete_journal_page",
+      delete:     "delete_journal_entry",
+    },
+    "action",
+    {
+      create:     ["name", "pages"],
+      addPage:    ["journalId", "page"],
+      updatePage: ["journalId", "pageId"],
+      deletePage: ["journalId", "pageId"],
+      delete:     ["journalId"],
     });
 
   // --- Scene: place a token ---
@@ -280,63 +262,28 @@ export function registerWorldAuthoringTools(mcp) {
       audit:    z.boolean().optional().describe(AUDIT_DESC),
     });
 
-  // --- Ownership: set ---
-  registerRoutedTool(mcp, "set_actor_ownership",
-    "Set ownership levels on an actor. The `ownership` param is a map of "
-    + "{ user → level }. Keys can be `default`, a userId, or an exact "
-    + "case-sensitive userName. Levels are strings (NONE/LIMITED/OBSERVER/"
-    + "OWNER/INHERIT) or the corresponding integers (0/1/2/3/-1). The map "
-    + "is MERGED with existing ownership — to clear a user's permission, "
-    + "pass them as `NONE` explicitly.",
+  // --- Combat (merged: start_combat, advance_combat, end_combat) ---
+  registerMergedTool(mcp, "combat",
+    "Control the combat tracker. "
+    + "action 'start' (tokenIds/rollInitiative optional) — starts an encounter, creating one "
+    + "on the current scene if none exists; can add tokens as combatants and roll initiative first. "
+    + "action 'advance' (direction optional, default 'next') — advances the turn; Foundry handles "
+    + "round transitions automatically. "
+    + "action 'end' — ends/deletes the active combat (the scene token roster is unaffected).",
     {
-      actorId:   z.string().describe("Actor document id."),
-      ownership: z.record(z.string(), z.union([
-        z.enum(["NONE", "LIMITED", "OBSERVER", "OWNER", "INHERIT"]),
-        z.number().int().min(-1).max(3)
-      ])).describe(
-        "Map of user → level. Use `default` for non-listed users. "
-        + "Example: { default: \"NONE\", \"Bob\": \"OWNER\" }."
-      ),
-      audit:     z.boolean().optional().describe(AUDIT_DESC),
-    });
-
-  // --- Ownership: read ---
-  registerRoutedTool(mcp, "get_actor_ownership",
-    "Read the current ownership map of an actor — returns level names "
-    + "(NONE/LIMITED/OBSERVER/OWNER) and resolved Foundry user names.",
-    {
-      actorId: z.string().describe("Actor document id."),
-    });
-
-  // --- Combat: start ---
-  registerRoutedTool(mcp, "start_combat",
-    "Start a combat encounter. Creates one on the current scene if none "
-    + "exists yet. Optionally adds tokens as combatants and rolls initiative "
-    + "before starting.",
-    {
-      tokenIds:       z.array(z.string()).optional().describe("Token ids to add as combatants before starting."),
+      action: z.enum(["start", "advance", "end"]).describe("Combat operation to perform."),
+      // start
+      tokenIds:       z.array(z.string()).optional().describe("[start] Token ids to add as combatants before starting."),
       rollInitiative: z.union([z.boolean(), z.enum(["all", "npc"])]).optional().describe(
-        "If true or 'all', roll for every combatant. If 'npc', only roll for NPC combatants. Default: no auto-roll."
+        "[start] If true or 'all', roll for every combatant. If 'npc', only roll for NPC combatants. Default: no auto-roll."
       ),
-      audit:          z.boolean().optional().describe(AUDIT_DESC),
-    });
-
-  // --- Combat: end ---
-  registerRoutedTool(mcp, "end_combat",
-    "End the active combat encounter (deletes it). The token roster on the "
-    + "scene is unaffected — only the combat tracker entry is removed.",
-    {
-      audit: z.boolean().optional().describe(AUDIT_DESC),
-    });
-
-  // --- Combat: advance ---
-  registerRoutedTool(mcp, "advance_combat",
-    "Advance the combat turn. Foundry handles round transitions "
-    + "automatically when wrapping past the last combatant.",
-    {
-      direction: z.enum(["next", "previous"]).optional().describe("Default 'next'."),
+      // advance
+      direction: z.enum(["next", "previous"]).optional().describe("[advance] Default 'next'."),
       audit:     z.boolean().optional().describe(AUDIT_DESC),
-    });
+    },
+    { start: "start_combat", advance: "advance_combat", end: "end_combat" },
+    "action",
+    { start: [], advance: [], end: [] });
 
   // --- Chat: send message ---
   registerRoutedTool(mcp, "send_chat_message",
@@ -382,7 +329,6 @@ export function registerWorldAuthoringTools(mcp) {
     });
 
   // --- Typed roll (v0.10.0) ---
-  // Shared schema for request_check / request_roll_typed.
   const _checkSchema = {
     actorId:    z.string().describe("Actor ID or name."),
     type:       z.enum(["skill", "ability", "save"]).describe("Category of the roll."),
@@ -401,54 +347,46 @@ export function registerWorldAuthoringTools(mcp) {
     "request_roll_typed"  // bridge-side handler name unchanged
   );
 
-  // Legacy alias — same behavior, older name. Will be removed in a future
-  // release; LLMs should prefer `request_check`.
-  registerRoutedTool(mcp, "request_roll_typed",
-    "DEPRECATED — use `request_check` instead. Same behavior; kept as an "
-    + "alias for backward compatibility. Will be removed in v0.13.",
-    _checkSchema);
-
-  // --- Attack roll (v0.10.0) ---
-  registerRoutedTool(mcp, "request_attack_roll",
-    "Triggers only the attack roll part of an item's workflow. Dialogs always suppressed.",
-    {
-      actorId:    z.string().describe("Actor ID or name."),
-      itemId:     z.string().describe("Item/weapon ID or name."),
-      activityId: z.string().optional().describe("D&D 5e specific activity ID (when an item has multiple attack activities)."),
-      adv:        z.enum(["normal", "advantage", "disadvantage"]).optional().describe("Force advantage state (system-dependent)."),
-      audit:      z.boolean().optional().describe(AUDIT_DESC),
-    });
-
-  // --- Damage roll (v0.10.0) ---
-  registerRoutedTool(mcp, "request_damage_roll",
-    "Triggers the damage roll for an item. The caller must provide critical state. "
-    + "Does NOT re-roll the attack — fetches the activity/strike directly from the item.",
-    {
-      actorId:    z.string().describe("Actor ID or name."),
-      itemId:     z.string().describe("Item/weapon ID or name."),
-      isCritical: z.boolean().optional().describe("Force critical damage (doubles dice on d20 systems)."),
-      audit:      z.boolean().optional().describe(AUDIT_DESC),
-    });
-
-  // --- Item use: Full Flow (v0.10.0) ---
+  // --- Item use (merged: request_item_use, request_attack_roll, request_damage_roll) ---
   registerRawTool(mcp, "request_item_use",
-    "Executes a full attack-and-damage workflow. Attack -> Hit? -> Damage -> (optional) Apply. "
-    + "Recommended tool for combat actions — threads crit state from the attack into damage "
-    + "automatically. Dialogs always suppressed.",
+    "Trigger an item's combat workflow. The `phase` selects which part runs and which params apply. "
+    + "Dialogs always suppressed.\n"
+    + "• phase 'full' (routes to request_item_use) → full attack-and-damage workflow: "
+    + "Attack -> Hit? -> Damage -> (optional) Apply. Recommended for combat actions — threads crit state from "
+    + "the attack into damage automatically. Needs actorId+itemId; targetIds optional (damage applied to these "
+    + "targets on hit); activityId/adv optional.\n"
+    + "• phase 'attack' (routes to request_attack_roll) → only the attack roll. Needs actorId+itemId; "
+    + "activityId/adv optional.\n"
+    + "• phase 'damage' (routes to request_damage_roll) → only the damage roll; caller supplies crit state. "
+    + "Does NOT re-roll the attack — fetches the activity/strike directly from the item. Needs actorId+itemId; "
+    + "isCritical optional.",
     {
+      phase:      z.enum(["full", "attack", "damage"]).describe("Which workflow part to run."),
       actorId:    z.string().describe("Actor ID or name."),
       itemId:     z.string().describe("Item/weapon ID or name."),
-      targetIds:  z.array(z.string()).optional().describe("If provided, damage is applied to these targets on hit."),
-      activityId: z.string().optional().describe("D&D 5e specific activity ID."),
-      adv:        z.enum(["normal", "advantage", "disadvantage"]).optional().describe("Force advantage state."),
-      targetUser: z.string().optional().describe(TARGET_USER_DESC),
+      targetIds:  z.array(z.string()).optional().describe("[full] If provided, damage is applied to these targets on hit."),
+      activityId: z.string().optional().describe("[full/attack] D&D 5e specific activity ID (when an item has multiple attack activities)."),
+      adv:        z.enum(["normal", "advantage", "disadvantage"]).optional().describe("[full/attack] Force advantage state (system-dependent)."),
+      isCritical: z.boolean().optional().describe("[damage] Force critical damage (doubles dice on d20 systems)."),
       audit:      z.boolean().optional().describe(AUDIT_DESC),
+      targetUser: z.string().optional().describe(TARGET_USER_DESC),
     },
+    // Custom callback (not registerMergedTool) so the `full` phase keeps its
+    // per-target timeout scaling — many-target AoE damage application is slow
+    // and would otherwise hit the 15s default RPC timeout. attack/damage use
+    // the default timeout.
     async (params) => {
-      const { targetUser, targetIds = [], ...rest } = params;
-      // Allow 10s base + 5s per target for potentially slow damage applications
-      const bridgeTimeoutMs = Math.max(15_000, 10_000 + (targetIds.length * 5000));
-      return callFoundry("request_item_use", { ...rest, targetIds }, targetUser, bridgeTimeoutMs);
+      const { phase = "full", targetUser, ...rest } = params;
+      const bridgeTool = { full: "request_item_use", attack: "request_attack_roll", damage: "request_damage_roll" }[phase];
+      if (!bridgeTool) {
+        return { content: [{ type: "text", text: `Error: unknown phase "${phase}" for request_item_use (use full|attack|damage).` }] };
+      }
+      let timeoutMs;
+      if (phase === "full") {
+        rest.targetIds = Array.isArray(rest.targetIds) ? rest.targetIds : [];
+        timeoutMs = Math.max(15_000, 10_000 + (rest.targetIds.length * 5000));
+      }
+      return callFoundry(bridgeTool, rest, targetUser, timeoutMs);
     });
 
   // --- Apply damage (v0.10.0) ---
@@ -464,120 +402,129 @@ export function registerWorldAuthoringTools(mcp) {
       audit:  z.boolean().optional().describe(AUDIT_DESC),
     });
 
-  // --- Scene levels CRUD (v0.12.0) ---
-  registerRoutedTool(mcp, "add_scene_level",
-    "Add a level (floor) to a multi-level scene. v14 only — `scene.levels` "
-    + "is a v14-native EmbeddedCollection. Returns the created level's id, "
-    + "name, and elevation range.",
+  // --- Scene levels (merged: add_scene_level, update_scene_level, remove_scene_level) ---
+  registerMergedTool(mcp, "scene_level",
+    "Manage levels (floors) of a multi-level scene. v14 only — `scene.levels` is a "
+    + "v14-native EmbeddedCollection. "
+    + "action 'add' needs sceneId+name+bottom+top — adds a level; returns its id, name, "
+    + "and elevation range. "
+    + "action 'update' needs sceneId+levelId (name/bottom/top optional) — changes the given "
+    + "fields, preserving the rest. "
+    + "action 'remove' needs sceneId+levelId — deletes a level (refuses on the only remaining one; permanent).",
     {
+      action: z.enum(["add", "update", "remove"]).describe("Scene-level operation to perform."),
       sceneId: z.string().describe("Target scene id."),
-      name:    z.string().describe("Level name (e.g. 'Ground', 'Upper', 'Basement')."),
-      bottom:  z.number().describe("Lower bound of the level's elevation range (in feet)."),
-      top:     z.number().describe("Upper bound of the level's elevation range (in feet)."),
+      // add / update level name
+      name:    z.string().optional().describe("[add] Level name (e.g. 'Ground', 'Upper', 'Basement'). [update] New level name."),
+      bottom:  z.number().optional().describe("[add] Lower bound of the level's elevation range (in feet). [update] New lower elevation bound."),
+      top:     z.number().optional().describe("[add] Upper bound of the level's elevation range (in feet). [update] New upper elevation bound."),
+      // update / remove
+      levelId: z.string().optional().describe("[update/remove] Level document id."),
       audit:   z.boolean().optional().describe(AUDIT_DESC),
+    },
+    { add: "add_scene_level", update: "update_scene_level", remove: "remove_scene_level" },
+    "action",
+    {
+      add:    ["sceneId", "name", "bottom", "top"],
+      update: ["sceneId", "levelId"],
+      remove: ["sceneId", "levelId"],
     });
 
-  registerRoutedTool(mcp, "update_scene_level",
-    "Update a level's name and/or elevation range. Provide whichever of "
-    + "`name`, `bottom`, `top` you want to change — the rest are preserved.",
+  // --- Region (merged: create_region, update_region, delete_region) ---
+  registerMergedTool(mcp, "region",
+    "Manage Regions (v13+) on a scene. Use `list_region_behavior_types` for behavior subtype schemas. "
+    + "action 'create' needs sceneId+name+shapes (behaviors/levels/color/visibility/locked/elevation/ownership optional). "
+    + "action 'update' needs sceneId+regionId+patch — `patch` is merged into the document "
+    + "(dotted paths like `elevation.bottom` accepted). "
+    + "action 'delete' needs sceneId+regionId — permanent.",
     {
-      sceneId: z.string().describe("Target scene id."),
-      levelId: z.string().describe("Level document id to update."),
-      name:    z.string().optional().describe("New level name."),
-      bottom:  z.number().optional().describe("New lower elevation bound."),
-      top:     z.number().optional().describe("New upper elevation bound."),
-      audit:   z.boolean().optional().describe(AUDIT_DESC),
-    });
-
-  registerRoutedTool(mcp, "remove_scene_level",
-    "Delete a level from a scene. Refuses on the only remaining level — "
-    + "a scene must always have at least one. Permanent.",
-    {
-      sceneId: z.string().describe("Target scene id."),
-      levelId: z.string().describe("Level document id to delete."),
-      audit:   z.boolean().optional().describe(AUDIT_DESC),
-    });
-
-  // --- Region CRUD (v0.12.0) ---
-  registerRoutedTool(mcp, "create_region",
-    "Create a Region (v13+) on a scene. Regions can have shapes, behaviors "
-    + "(scriptable triggers), and level memberships. Use `shapes` for the "
-    + "geometry, `behaviors` for the scriptable actions, `levels` to scope "
-    + "the region to specific floors. Use `list_region_behavior_types` for "
-    + "the schemas of every behavior subtype.",
-    {
+      action: z.enum(["create", "update", "delete"]).describe("Region operation to perform."),
       sceneId:    z.string().describe("Target scene id."),
-      name:       z.string().describe("Region name."),
-      shapes:     z.array(z.record(z.string(), z.any())).describe(
-        "Non-empty array of RegionShape data (e.g. {type:'rectangle', x, y, width, height})."
+      // create
+      name:       z.string().optional().describe("[create] Region name."),
+      shapes:     z.array(z.record(z.string(), z.any())).optional().describe(
+        "[create] Non-empty array of RegionShape data (e.g. {type:'rectangle', x, y, width, height})."
       ),
       behaviors:  z.array(z.record(z.string(), z.any())).optional().describe(
-        "RegionBehavior data (e.g. {type:'executeScript', system:{source}})."
+        "[create] RegionBehavior data (e.g. {type:'executeScript', system:{source}})."
       ),
-      levels:     z.array(z.string()).optional().describe("Level ids the region applies to."),
-      color:      z.string().optional().describe("Hex color for the region overlay."),
-      visibility: z.number().int().optional().describe("Visibility level (0–4 per Foundry's enum)."),
-      locked:     z.boolean().optional().describe("Lock the region from interactive selection."),
-      elevation:  z.record(z.string(), z.any()).optional().describe("Override elevation range {bottom, top}."),
-      ownership:  z.record(z.string(), z.any()).optional().describe("Per-user ownership map."),
+      levels:     z.array(z.string()).optional().describe("[create] Level ids the region applies to."),
+      color:      z.string().optional().describe("[create] Hex color for the region overlay."),
+      visibility: z.number().int().optional().describe("[create] Visibility level (0–4 per Foundry's enum)."),
+      locked:     z.boolean().optional().describe("[create] Lock the region from interactive selection."),
+      elevation:  z.record(z.string(), z.any()).optional().describe("[create] Override elevation range {bottom, top}."),
+      ownership:  z.record(z.string(), z.any()).optional().describe("[create] Per-user ownership map."),
+      // update / delete
+      regionId:   z.string().optional().describe("[update/delete] Region document id."),
+      patch:      z.record(z.string(), z.any()).optional().describe(
+        "[update] Fields to merge into the region (e.g. {visibility: 0, locked: false})."
+      ),
       audit:      z.boolean().optional().describe(AUDIT_DESC),
+    },
+    { create: "create_region", update: "update_region", delete: "delete_region" },
+    "action",
+    {
+      create: ["sceneId", "name", "shapes"],
+      update: ["sceneId", "regionId", "patch"],
+      delete: ["sceneId", "regionId"],
     });
 
-  registerRoutedTool(mcp, "update_region",
-    "Patch any field on an existing region. `patch` is merged into the "
-    + "document — Foundry's diff-update semantics apply (dotted paths like "
-    + "`elevation.bottom` accepted). Use this to flip visibility, locked, "
-    + "rename, swap behaviors, etc.",
+  // --- Scene (merged: create_scene, update_scene, activate_scene, delete_scene) ---
+  registerMergedTool(mcp, "scene",
+    "Create, update, activate, or delete a scene. "
+    + "action 'create' needs name (width/height/padding/grid*/backgroundColor/background/foreground/"
+    + "levelFog/fog/fogExploration/folderId/activate optional) — activates the new scene unless activate:false. "
+    + "action 'update' needs sceneId plus the whitelisted fields to patch (name, padding, backgroundColor, "
+    + "background, foreground, levelFog, fog, grid, navigation, sort, navName, fogExploration, initial). "
+    + "action 'activate' needs sceneId or sceneName — switches the canvas to view it. "
+    + "action 'delete' needs sceneId or sceneName (force optional — required to delete the active scene). Permanent.",
     {
-      sceneId:  z.string().describe("Target scene id."),
-      regionId: z.string().describe("Region document id."),
-      patch:    z.record(z.string(), z.any()).describe(
-        "Fields to merge into the region (e.g. {visibility: 0, locked: false})."
+      action: z.enum(["create", "update", "activate", "delete"]).describe("Scene operation to perform."),
+      // shared id / name
+      sceneId:   z.string().optional().describe("[update] Target scene id. [activate/delete] Scene document id (preferred — unambiguous)."),
+      sceneName: z.string().optional().describe("[activate/delete] Scene name (exact match). Used only if `sceneId` is omitted."),
+      name:      z.string().optional().describe("[create] Scene name (shown in the sidebar). [update] New scene name."),
+      // create-specific geometry
+      width:           z.number().int().optional().describe("[create] Width in pixels. Default 4000."),
+      height:          z.number().int().optional().describe("[create] Height in pixels. Default 3000."),
+      gridType:        z.number().int().optional().describe("[create] CONST.GRID_TYPES value (0=Gridless, 1=Square, 2-5=Hex variants). Default 1 (Square)."),
+      gridSize:        z.number().int().optional().describe("[create] Grid cell size in pixels. Default 100."),
+      gridAlpha:       z.number().optional().describe("[create] Grid line alpha (0.0–1.0). Default 0.2."),
+      folderId:        z.string().optional().describe("[create] Parent folder id (Scene type)."),
+      activate:        z.boolean().optional().describe("[create] Activate after creating. Default true."),
+      // shared create/update fields
+      padding:         z.number().optional().describe("[create] Outer padding (0.0–0.5). Default 0.25. [update] New padding."),
+      backgroundColor: z.string().optional().describe("[create] Hex background color. Default '#1c1c1c'. [update] New hex background color."),
+      background:      z.union([z.string(), z.record(z.string(), z.any())]).optional().describe(
+        "[create] Background image path or data object. [update] Background data object (e.g. {src: 'path/to/image.webp'}). "
+        + "On v14 background fields map to Level.background and transforms to Level.textures."
       ),
-      audit:    z.boolean().optional().describe(AUDIT_DESC),
-    });
-
-  registerRoutedTool(mcp, "delete_region",
-    "Delete a region by id. Permanent.",
-    {
-      sceneId:  z.string().describe("Target scene id."),
-      regionId: z.string().describe("Region document id to delete."),
-      audit:    z.boolean().optional().describe(AUDIT_DESC),
-    });
-
-  // --- Update scene (v0.12.1) ---
-  registerRoutedTool(mcp, "update_scene",
-    "Patch fields on an existing scene. Whitelisted: name, padding, "
-    + "backgroundColor, background, foreground, levelFog, fog, grid, "
-    + "navigation, sort, navName, fogExploration, and initial. Foundry v14 "
-    + "Level-backed fields are translated automatically.",
-    {
-      sceneId:         z.string().describe("Target scene id."),
-      name:            z.string().optional(),
-      padding:         z.number().optional(),
-      backgroundColor: z.string().optional(),
-      background:      z.record(z.string(), z.any()).optional().describe("Background data object (e.g. {src: 'path/to/image.webp'})."),
-      foreground:      z.record(z.string(), z.any()).optional().describe("Foreground texture data; Level-backed on v14."),
-      levelFog:        z.record(z.string(), z.any()).optional().describe("Level fog texture data {src, tint}; v14 only."),
-      fog:             z.record(z.string(), z.any()).optional().describe("Scene fog config, e.g. {mode: 0|1|2, colors}."),
-      grid:            z.record(z.string(), z.any()).optional().describe("Grid object (e.g. {size: 100, type: 1, alpha: 0.2})."),
-      navigation:      z.boolean().optional().describe("Whether the scene appears in the navigation bar."),
-      sort:            z.number().int().optional().describe("Navigation sort order."),
-      navName:         z.string().optional().describe("Short name shown in the navigation bar."),
-      fogExploration:  z.boolean().optional().describe("Compatibility boolean. On v14 maps false→fog.mode 0 and true→fog.mode 1."),
-      initial:         z.record(z.string(), z.any()).optional().describe("Initial view config (e.g. {level: '<levelId>', x, y, scale})."),
-      audit:           z.boolean().optional().describe(AUDIT_DESC),
-    });
-
-  // --- Activate scene (v0.11.2) ---
-  registerRoutedTool(mcp, "activate_scene",
-    "Activate an existing scene by id or exact name — switches the canvas " +
-    "to view it. Use this to navigate between scenes without creating new "
-    + "ones. Pair with `list_scenes` to discover the id you need.",
-    {
-      sceneId:   z.string().optional().describe("Scene document id (preferred — unambiguous)."),
-      sceneName: z.string().optional().describe("Scene name (exact match). Used only if `sceneId` is omitted."),
+      foreground:      z.record(z.string(), z.any()).optional().describe("[create/update] Foreground texture data; Level-backed on v14."),
+      levelFog:        z.record(z.string(), z.any()).optional().describe("[create/update] Level fog texture data {src, tint}; v14 only."),
+      fog:             z.record(z.string(), z.any()).optional().describe("[create/update] Scene fog config, e.g. {mode: 0|1|2, colors}."),
+      fogExploration:  z.boolean().optional().describe("[create/update] Compatibility boolean for fog exploration. On v14 update maps false→fog.mode 0 and true→fog.mode 1."),
+      // update-only fields
+      grid:            z.record(z.string(), z.any()).optional().describe("[update] Grid object (e.g. {size: 100, type: 1, alpha: 0.2})."),
+      navigation:      z.boolean().optional().describe("[update] Whether the scene appears in the navigation bar."),
+      sort:            z.number().int().optional().describe("[update] Navigation sort order."),
+      navName:         z.string().optional().describe("[update] Short name shown in the navigation bar."),
+      initial:         z.record(z.string(), z.any()).optional().describe("[update] Initial view config (e.g. {level: '<levelId>', x, y, scale})."),
+      // delete-only
+      force:     z.boolean().optional().describe("[delete] Set true to delete even if the scene is currently active. Default false."),
       audit:     z.boolean().optional().describe(AUDIT_DESC),
+    },
+    {
+      create:   "create_scene",
+      update:   "update_scene",
+      activate: "activate_scene",
+      delete:   "delete_scene",
+    },
+    "action",
+    {
+      create:   ["name"],
+      update:   ["sceneId"],
+      activate: [],
+      delete:   [],
     });
 
   // --- List scenes (v0.11.2) ---
@@ -586,44 +533,6 @@ export function registerWorldAuthoringTools(mcp) {
     + "Use to enumerate available scenes when you only know a name fragment "
     + "or need to find which scene is currently active.",
     {});
-
-  // --- Create scene (v0.11.2) ---
-  registerRoutedTool(mcp, "create_scene",
-    "Create a new scene with sensible defaults. Activates the new scene "
-    + "automatically unless `activate: false` is set — saves a second call "
-    + "for the common 'make it then look at it' workflow.",
-    {
-      name:            z.string().describe("Scene name (shown in the sidebar)."),
-      width:           z.number().int().optional().describe("Width in pixels. Default 4000."),
-      height:          z.number().int().optional().describe("Height in pixels. Default 3000."),
-      padding:         z.number().optional().describe("Outer padding (0.0–0.5). Default 0.25."),
-      gridType:        z.number().int().optional().describe("CONST.GRID_TYPES value (0=Gridless, 1=Square, 2-5=Hex variants). Default 1 (Square)."),
-      gridSize:        z.number().int().optional().describe("Grid cell size in pixels. Default 100."),
-      gridAlpha:       z.number().optional().describe("Grid line alpha (0.0–1.0). Default 0.2."),
-      backgroundColor: z.string().optional().describe("Hex background color. Default '#1c1c1c'."),
-      background:      z.union([z.string(), z.record(z.string(), z.any())]).optional().describe(
-        "Background image path or data object. On v14 background fields map to Level.background and transforms to Level.textures."
-      ),
-      foreground:      z.record(z.string(), z.any()).optional().describe("Foreground texture data; Level-backed on v14."),
-      levelFog:        z.record(z.string(), z.any()).optional().describe("Level fog texture data {src, tint}; v14 only."),
-      fog:             z.record(z.string(), z.any()).optional().describe("Scene fog config, e.g. {mode: 0|1|2, colors}."),
-      fogExploration:  z.boolean().optional().describe("Compatibility boolean for fog exploration."),
-      folderId:        z.string().optional().describe("Parent folder id (Scene type)."),
-      activate:        z.boolean().optional().describe("Activate after creating. Default true."),
-      audit:           z.boolean().optional().describe(AUDIT_DESC),
-    });
-
-  // --- Delete scene (v0.11.2) ---
-  registerRoutedTool(mcp, "delete_scene",
-    "Delete a scene by id or exact name. Refuses to delete the currently "
-    + "active scene unless `force: true` is passed — protects against "
-    + "accidentally wiping the open canvas. Permanent.",
-    {
-      sceneId:   z.string().optional().describe("Scene document id to delete (preferred — unambiguous)."),
-      sceneName: z.string().optional().describe("Scene name (exact match). Used only if `sceneId` is omitted."),
-      force:     z.boolean().optional().describe("Set true to delete even if the scene is currently active. Default false."),
-      audit:     z.boolean().optional().describe(AUDIT_DESC),
-    });
 
   // --- Place measured template (v0.11) ---
   registerRoutedTool(mcp, "place_measured_template",

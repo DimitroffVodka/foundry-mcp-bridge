@@ -2,7 +2,6 @@
  * Hook + socket tracing — runtime diagnostics for figuring out what's
  * happening during an action.
  *
- *   - `trace_hook`  — single named hook, capture N firings or N ms
  *   - `trace_hooks` — multiple hooks at once, time-ordered timeline
  *   - `trace_socket`— tap `game.socket` for a window, in/out events
  */
@@ -16,18 +15,6 @@ import { WORKFLOW_PRESETS, PRESET_KEYS, presetCatalogue }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 export function registerTracingTools(mcp) {
-  registerRoutedTool(mcp, "trace_hook",
-    "Register a temporary listener on a named Foundry hook, collect up to " +
-    "`count` firings (or until `timeoutMs` elapses), unregister, and return " +
-    "the serialized arguments of each invocation. Documents are summarised to " +
-    "{ _document, id, name, uuid }. Useful for discovering what a hook actually " +
-    "receives at runtime.",
-    {
-      hook:      z.string().describe("Hook name (e.g. 'renderVagabondCharacterSheet', 'updateActor')"),
-      count:     z.number().optional().describe("Max firings to collect (1–20). Default 1."),
-      timeoutMs: z.number().optional().describe("Give up after this many ms (100–12000). Default 5000."),
-    });
-
   registerRoutedTool(mcp, "trace_hooks",
     "Register listeners on multiple Foundry hooks at once and return a single " +
     "time-ordered timeline of every firing. Each entry is { at, dt, hook, args } " +

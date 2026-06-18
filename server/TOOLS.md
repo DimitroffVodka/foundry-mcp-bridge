@@ -293,17 +293,28 @@ Rolling buffer of `console.error`/`console.warn` captured by the bridge. The bri
 - **Params**: `count?`, `sinceMs?` (default 60000), `level?`.
 - **Returns**: `{ bufferSize, bufferCapacity, returned, entries }`.
 
-### `trace_hook`
-Registers a temporary listener on a named Foundry hook, collects firings, then unregisters. Use this to figure out what args a hook receives before writing code against it.
+### `trace_hooks`
+Register listeners on **multiple** Foundry hooks at once and return a single time-ordered timeline of every firing. Use this to figure out what args hooks receive (and in what order) before writing code against them. (The old singular `trace_hook` was removed — pass a one-element `hooks` array for the same effect.)
 
 - **Params**:
-  - `hook` (required) — hook name. Examples: `"updateActor"`, `"createChatMessage"`, `"renderCharacterSheet"`, `"preUpdateToken"`, `"updateCombat"`.
-  - `count?` — stop after this many firings (1–20, default 1).
-  - `timeoutMs?` — give up after this long (100–12000, default 5000).
-- **Returns**: `{ hook, reason: "count"|"timeout", firings: [{ at: timestamp, args: [...] }] }`
+  - `hooks` (required) — array of hook names to listen on simultaneously. Examples: `["updateActor"]`, `["preCreateActor", "createActor", "preUpdateActor", "updateActor", "renderActorSheet"]`.
+  - `count?` — max total firings across all hooks (1–500, default 50).
+  - `timeoutMs?` — give up after this long (100–30000, default 5000).
+  - `until?` — stop as soon as this hook fires (must be one of `hooks`).
+- **Returns**: a time-ordered timeline where each entry is `{ at, dt, hook, args }` (`dt` is ms since the first firing).
 - **How args are serialized**: Foundry documents are summarized to `{_document: "Actor"|"Token"|…, id, name, uuid}` (full serialization would be huge). Maps become objects, Sets become arrays, arrays are truncated to 10 items, object keys to 25. Depth capped at 3.
-- **Practical uses**: Hook into `preCreateChatMessage` to see what a click produces; `renderActorSheet` to see the app/html/data args; `updateToken` to learn what field changed.
-- **Siblings**: `trace_hooks` (many hooks at once → one time-ordered timeline, with an `until` terminator) and `trace_socket` (taps `game.socket` in/out events). See `trace_workflow` below to drive these from a preset.
+- **Practical uses**: Hook into `preCreateChatMessage` to see what a click produces; `renderActorSheet` to see the app/html/data args; `updateToken` to learn what field changed; trace an ordered list to diagnose hook-order bugs.
+- **Siblings**: `trace_socket` (taps `game.socket` in/out events). See `trace_workflow` below to drive these from a preset.
+
+### `trace_socket`
+Tap `game.socket` for a time window. Captures outgoing `socket.emit` calls and incoming events (via Socket.IO `onAny`). Indispensable for debugging socket-driven state sync (e.g. modules that broadcast `module.<id>` events between GM and players).
+
+- **Params**:
+  - `filter?` — substring match on event name (e.g. `"module.vagabond-crawler"`); only matching events are recorded.
+  - `count?` — max events to capture (1–1000, default 100).
+  - `timeoutMs?` — give up after this long (100–30000, default 5000).
+- **Returns**: time-ordered `{ at, dt, dir: "in"|"out", event, args }`.
+- **Caveat**: don't run two `trace_socket` calls in parallel.
 
 ### `trace_workflow`
 One-call **investigation** built on top of `trace_hooks` + `snapshot_actors` + `diff`. Expands a named **preset** into the exact hook list — Foundry has no wildcard hook matching, so this is how you trace a full Midi-QOL workflow without hand-typing ~12 hook strings — opens the window, optionally fires the action inside it, and (with `watch`) returns a before/after actor diff next to the timeline.
@@ -364,44 +375,37 @@ Poll a background evaluation or read a large JSON result in bounded chunks.
 ## Screenshots
 
 ### `screenshot`
-Fast snapshot of the PIXI game canvas (map + tokens, at your current pan/zoom). Uses `renderer.render(stage → RenderTexture)` + `renderer.extract.canvas(...)` — needed because the live WebGL context has `preserveDrawingBuffer: false`, so `view.toDataURL()` would return black.
+Capture a Foundry image. **Returns an image** (MCP image content block). The `target` discriminator selects what to capture and which params apply. This merges the old `screenshot` / `screenshot_dom` / `capture_scene` tools.
 
+- **Discriminator**: `target?` — `"canvas"` (default), `"dom"`, or `"scene_grid"`.
 - **Params**:
-  - `scale?` — 0.1–1.0, default 0.5. Downscales before encoding.
-  - `quality?` — 0.1–1.0, default 0.7 (JPEG only).
-  - `format?` — `"jpeg"` (default) or `"png"`.
-- **Returns**: MCP image content + caption `Canvas screenshot — W×H mime`.
-- **Does NOT capture**: DOM overlays (character sheets, HUD, notifications, targeting reticles) — only the PIXI canvas.
-- **Hidden-tab handling**: advances the PIXI ticker immediately before capture
-  so queued placeable render flags are applied even when the tab is backgrounded.
+  - `target?` — what to capture (see per-target rows below).
+  - `scale?` **[canvas/dom]** — resize factor 0.1–1.0. Default 0.5 (canvas) / 0.75 (dom).
+  - `quality?` **[canvas/dom]** — JPEG quality 0.1–1.0. Default 0.7 (canvas) / 0.8 (dom). Ignored for PNG.
+  - `format?` **[canvas/dom]** — `"jpeg"` or `"png"`. Default `"jpeg"` (canvas) / `"png"` (dom).
+  - `selector?` **[dom]** — CSS selector of the element to capture. Default `"body"` (entire page).
 
-### `screenshot_dom`
-Screenshot an arbitrary **DOM element** (character sheets, HUD, chat cards, app windows, sidebar) via `html2canvas`. Fills the gap that `screenshot` intentionally leaves — `screenshot` is PIXI-only. `html2canvas` is lazy-loaded from `cdn.jsdelivr.net` on first call and cached on `globalThis._mcp_html2canvas` for subsequent calls.
+**`target: "canvas"`** (default) — fast snapshot of the PIXI game canvas (map + tokens, at your current pan/zoom). Uses `renderer.render(stage → RenderTexture)` + `renderer.extract.canvas(...)` — needed because the live WebGL context has `preserveDrawingBuffer: false`, so `view.toDataURL()` would return black.
+- **Returns**: image content + caption `Canvas screenshot — W×H mime`.
+- **Does NOT capture**: DOM overlays (character sheets, HUD, notifications, targeting reticles) — only the PIXI canvas. Use `target: "dom"` for those.
+- **Hidden-tab handling**: advances the PIXI ticker immediately before capture so queued placeable render flags are applied even when the tab is backgrounded.
 
-- **Params**:
-  - `selector?` — CSS selector of the element to capture. Default `"body"` (entire page). Useful selectors:
-    - `'.app.sheet'` — a rendered actor/item sheet.
-    - `'.app[data-appid="123"]'` — a specific app by id.
-    - `'#chat-log'` — the chat panel.
-    - `'#sidebar'` — the full right sidebar.
-    - `'#party-bar'`, `'.crawler-bar'`, etc. — custom module UI.
-  - `scale?` — downscale factor 0.1–1.0 (default 0.75).
-  - `quality?` — JPEG quality 0.1–1.0 (default 0.8; ignored for PNG).
-  - `format?` — `"png"` (default; better for UI with solid colors) or `"jpeg"`.
-- **Returns**: MCP image content + caption `DOM screenshot of \`selector\` (tag#id) — W×H mime`.
+**`target: "dom"`** — screenshot an arbitrary **DOM element** (character sheets, HUD, chat cards, app windows, sidebar) via `html2canvas`. Fills the gap `target: "canvas"` leaves (PIXI-only). `html2canvas` is lazy-loaded from a CDN on first call and cached for subsequent calls. Useful `selector` values:
+  - `'.app.sheet'` — a rendered actor/item sheet.
+  - `'.app[data-appid="123"]'` — a specific app by id.
+  - `'#chat-log'` — the chat panel.
+  - `'#sidebar'` — the full right sidebar.
+  - `'#party-bar'`, `'.crawler-bar'`, etc. — custom module UI.
+- **Returns**: image content + caption `DOM screenshot of \`selector\` (tag#id) — W×H mime`.
 - **Gotchas**:
   - `html2canvas` re-rasterizes by reading computed CSS. It's **approximate**: 3D transforms, `backdrop-filter`, complex shaders, and cross-origin images without CORS headers may render blank or wrong.
   - First call pays the CDN load cost (~2s first time, cached after).
   - Requires internet access the first time it's called on a given Foundry page load.
 
-### `capture_scene`
-Like `screenshot` but at **full resolution**, **WebP**, and with a **coordinate grid overlay** — every grid cell gets a `"gx,gy"` label rendered in white-on-black. Much bigger payload; vastly better for spatial reasoning.
-
-- **Params**: none
-- **Returns**: MCP image content + caption `Scene "name" [id] — W×H image/webp with grid overlay`.
+**`target: "scene_grid"`** — like `canvas` but at **full resolution**, **WebP**, and with a **coordinate grid overlay** — every grid cell gets a `"gx,gy"` label rendered in white-on-black. Much bigger payload; vastly better for spatial reasoning. Takes no extra capture params (`scale`/`quality`/`format`/`selector` are ignored).
+- **Returns**: image content + caption `Scene "name" [id] — W×H image/webp with grid overlay`.
 - **Overlay details**: 1px white grid lines at 15% alpha, PIXI.Text labels per cell at 22% of `gridSize` font size, black stroke, 65% alpha. Overlay is added to the stage, the stage is rendered to RenderTexture, the overlay is destroyed after. Live view unaffected once the next ticker frame runs.
-- **Hidden-tab handling**: advances the PIXI ticker before adding and rendering
-  the overlay, preventing newly-created placeables from being captured at `(0,0)`.
+- **Hidden-tab handling**: advances the PIXI ticker before adding and rendering the overlay, preventing newly-created placeables from being captured at `(0,0)`.
 
 ---
 
@@ -503,24 +507,23 @@ Lists system-registered status effects so you know valid `condition` values for 
   - `hud` — optional object with HUD metadata (category, grouping).
 
 ### `move_token`
-**Teleport.** No wall check, no animation smoothing across obstacles. Useful for quick GM-moves.
+Move a token to `(x, y)` on the active scene. The `pathed` flag selects between a straight move and A* pathfinding. Merges the old `move_token` / `move_token_pathed` tools.
 
-- **Params**: `token`, `x` (pixels), `y` (pixels), `animate?` (default true; if false, teleports with zero-duration animation).
-- **Returns**: `{ id, name, x, y }`.
-
-### `move_token_pathed`
-**Smart move.** Runs A* against scene walls via `CONFIG.Canvas.polygonBackends.move`. Optionally opens closed doors along the path. Only the **final hop** animates — intermediate hops teleport (otherwise you get jittery animation through walls).
-
+- **Discriminator**: `pathed?` — `false` (default, straight move) or `true` (A* pathfinding, routes to `move_token_pathed`).
 - **Params**:
-  - `token` (required), `x, y` (pixels, required).
-  - `animate?` — animate the final hop (default true).
-  - `canOpenDoors?` — open closed doors en route (default false). When true, uses door-aware collision: A* routes as if doors were passable, and the handler calls `wall.update({ds: 1})` + waits 400ms before each door-crossing hop.
-  - `elevation?, rotation?` — applied to the final waypoint only.
-- **Returns**: `{ id, name, x, y, pathCost, doorsOpened: [wallId, ...] }`. `pathCost` is the A* step count (diagonal = 1, cardinal = 1). `doorsOpened` lists the wall ids of doors actually opened (in order).
-- **Errors**:
-  - `{ error: "Path blocked — no valid route to destination" }` if A* exhausts without reaching the target.
-  - Falls back to a plain teleport if no polygon backend or no grid (returns with `pathCost: null`).
-- **Limits**: A* node cap is 2500, so very long paths (50+ tiles) on cramped maps may fail even if technically routable — retry with a shorter hop.
+  - `token` (required) — token id, name, or linked actor name.
+  - `x, y` (required) — target coordinates in scene pixels.
+  - `animate?` — animate the move (default true). When `pathed=true`, animates only the final hop.
+  - `pathed?` — use A* pathfinding against scene walls. Default false.
+  - `canOpenDoors?` **[pathed=true]** — open closed doors along the path (default false). Uses door-aware collision: A* routes as if doors were passable, and the handler calls `wall.update({ds: 1})` + waits 400ms before each door-crossing hop.
+  - `elevation?` **[pathed=true]** — applied to the final waypoint only.
+  - `rotation?` **[pathed=true]** — applied to the final waypoint only.
+- **`pathed=false` (default)**: straight **teleport**. No wall check, no animation smoothing across obstacles. Pass `animate: false` for a zero-duration instant placement. Useful for quick GM-moves.
+  - **Returns**: `{ id, name, x, y }`.
+- **`pathed=true`**: **smart move.** Runs A* against scene walls via `CONFIG.Canvas.polygonBackends.move`. Only the **final hop** animates — intermediate hops teleport (otherwise you get jittery animation through walls).
+  - **Returns**: `{ id, name, x, y, pathCost, doorsOpened: [wallId, ...] }`. `pathCost` is the A* step count (diagonal = 1, cardinal = 1). `doorsOpened` lists the wall ids of doors actually opened (in order).
+  - **Errors**: `{ error: "Path blocked — no valid route to destination" }` if A* exhausts without reaching the target. Falls back to a plain teleport if no polygon backend or no grid (returns with `pathCost: null`).
+  - **Limits**: A* node cap is 2500, so very long paths (50+ tiles) on cramped maps may fail even if technically routable — retry with a shorter hop.
 
 ### `update_token`
 Patch multiple token fields at once. **Whitelisted keys only** — anything else is silently dropped.
@@ -566,25 +569,22 @@ Read-only view of the active combat encounter. Returns `{ active: false }` when 
   - `currentCombatant` — `{ id, name, tokenId, actorId, initiative }` of whose turn it is, or `null`.
   - `combatants` — initiative-sorted array of `{ id, name, tokenId, actorId, initiative, hp, defeated, hidden }`. `hp` is system-specific (probes `system.attributes.hp` then `system.hp`).
 
-### `start_combat` (write — opt-in)
-Start a combat encounter. Creates one on the current scene if none exists, optionally adds combatants and rolls initiative.
+### `combat` (write — opt-in)
+Control the combat tracker. The `action` discriminator selects the operation. Merges the old `start_combat` / `advance_combat` / `end_combat` tools.
 
+- **Discriminator**: `action` — `"start"`, `"advance"`, or `"end"`.
 - **Params**:
-  - `tokenIds` (optional) — token document ids to add as combatants before starting.
-  - `rollInitiative` (optional) — `true`/`"all"` rolls every combatant; `"npc"` rolls NPCs only; omit or `false` to skip auto-roll.
-- **Returns**: `{ started, combatId, round, combatantCount, currentCombatantId }`. If combat was already in progress: `{ started: false, reason, combatId, round }`.
-
-### `end_combat` (write — opt-in)
-End and delete the active combat encounter. The token roster on the scene is unaffected.
-
-- **Params**: none.
-- **Returns**: `{ id, round, combatantCount, ended: true }`.
-
-### `advance_combat` (write — opt-in)
-Step the combat turn forward or backward. Foundry handles round transitions automatically.
-
-- **Params**: `direction` — `"next"` (default) or `"previous"`.
-- **Returns**: `{ combatId, round, turn, currentCombatant: { id, name, initiative } }`.
+  - `action` (required) — combat operation to perform.
+  - `tokenIds?` **[start]** — token document ids to add as combatants before starting.
+  - `rollInitiative?` **[start]** — `true`/`"all"` rolls every combatant; `"npc"` rolls NPCs only; omit or `false` to skip auto-roll.
+  - `direction?` **[advance]** — `"next"` (default) or `"previous"`.
+  - `audit?` — see [`audit`](#audit-optional-mutating-tools-only).
+- **`action: "start"`**: start a combat encounter. Creates one on the current scene if none exists, optionally adds combatants and rolls initiative.
+  - **Returns**: `{ started, combatId, round, combatantCount, currentCombatantId }`. If combat was already in progress: `{ started: false, reason, combatId, round }`.
+- **`action: "advance"`**: step the combat turn forward or backward. Foundry handles round transitions automatically.
+  - **Returns**: `{ combatId, round, turn, currentCombatant: { id, name, initiative } }`.
+- **`action: "end"`**: end and delete the active combat encounter. The token roster on the scene is unaffected.
+  - **Returns**: `{ id, round, combatantCount, ended: true }`.
 
 ---
 
@@ -650,133 +650,111 @@ Run a guarded schema-drift smoke test after a Foundry core update.
 - **Returns**: `{ runId, pass, checks, cleanup }`. Any failed assertion or
   undeleted document makes `pass` false.
 
-### `create_folder`
-Create a sidebar folder. **Idempotent** — if a folder with the same `type` + `name` + `parentFolder` already exists, returns it with `existed: true` instead of creating a duplicate.
+### `folder`
+Create or delete a sidebar folder. The `action` discriminator selects the operation. Merges the old `create_folder` / `delete_folder` tools.
 
+- **Discriminator**: `action` — `"create"` or `"delete"`.
 - **Params**:
-  - `type` — `"Actor"`, `"Item"`, `"JournalEntry"`, `"Scene"`, `"Macro"`, `"Playlist"`, `"RollTable"`, or `"Cards"`.
-  - `name` — folder name (case-sensitive).
-  - `parentFolder` (optional) — parent folder id or exact name within the same `type`.
-  - `color` (optional) — hex like `"#3a5"`.
-- **Returns**: `{ id, name, type, parent, existed }`.
+  - `action` (required) — folder operation.
+  - `type?` **[create]** — `"Actor"`, `"Item"`, `"JournalEntry"`, `"Scene"`, `"Macro"`, `"Playlist"`, `"RollTable"`, or `"Cards"`.
+  - `name?` **[create]** — folder name (case-sensitive).
+  - `parentFolder?` **[create]** — parent folder id or exact name within the same `type`.
+  - `color?` **[create]** — hex like `"#3a5"`.
+  - `folderId?` **[delete]** — folder document id.
+  - `deleteContents?` **[delete]** — if `true`, delete every document and subfolder inside too. Default `false` (orphans them — sets their `folder` to null). Permanent.
+  - `audit?` — see [`audit`](#audit-optional-mutating-tools-only).
+- **`action: "create"`**: **Idempotent** — if a folder with the same `type` + `name` + `parentFolder` already exists, returns it with `existed: true` instead of creating a duplicate.
+  - **Returns**: `{ id, name, type, parent, existed }`.
+- **`action: "delete"`**: delete a folder by id.
+  - **Returns**: `{ id, name, type, deleted: true, deleteContents }`.
 
-### `create_actor_from_compendium`
-Import an actor from a compendium pack into the world.
+### `actor_write`
+Create, import, update, or delete a world actor. The `action` discriminator selects the operation. Merges the old `create_actor` / `create_actor_from_compendium` / `update_actor` / `delete_actor` tools.
 
+> For `create`, **call `get_data_model({type:"Actor", subtype:"<type>"})` first** if you don't already know the shape for the active system. Without that, you'll likely produce a malformed actor.
+
+- **Discriminator**: `action` — `"create"`, `"fromCompendium"`, `"update"`, or `"delete"`.
 - **Params**:
-  - `pack` — pack id (e.g. `"dnd5e.monsters"`).
-  - `documentId` — document id within the pack (use `search_compendium` to find).
-  - `folderId` (optional) — target folder id.
-  - `folderName` (optional) — target folder by exact name. Auto-created as an `Actor` folder if missing. `folderId` wins if both are given.
-  - `nameOverride` (optional) — rename on import.
-- **Returns**: `{ id, name, type, folder, sourcePack, sourceDocId }`.
+  - `action` (required) — actor operation.
+  - `actorId?` **[update/delete]** — actor document id.
+  - `name?` **[create]** actor name / **[update]** replace the actor's name.
+  - `type?` **[create]** — system-specific actor subtype (e.g. `"character"`, `"npc"` for dnd5e; `"Player"` for shadowdark).
+  - `system?` **[create]** system-specific data block / **[update]** merged into the actor's `system` data.
+  - `items?` **[create]** — inline items to attach at creation. Each entry is `{ pack, documentId, nameOverride? }` (compendium ref) or `{ name, type, system?, ... }` (inline).
+  - `img?` **[create]** portrait path/URL / **[update]** replace the portrait image path/URL.
+  - `prototypeToken?` **[create]** prototype token data / **[update]** merged into the prototype token (affects future tokens placed from this actor).
+  - `folderId?` **[create/fromCompendium]** — target folder id (wins over `folderName` if both given).
+  - `folderName?` **[create/fromCompendium]** — target folder by exact name. Auto-created as an `Actor` folder if missing.
+  - `pack?` **[fromCompendium]** — pack id (e.g. `"dnd5e.monsters"`).
+  - `documentId?` **[fromCompendium]** — document id within the pack (use `search_compendium` to find).
+  - `nameOverride?` **[fromCompendium]** — rename the imported actor.
+  - `audit?` — see [`audit`](#audit-optional-mutating-tools-only).
+- **`action: "create"`** — build a brand-new actor in the world. Returns `{ id, name, type, folder, itemIds }`.
+- **`action: "fromCompendium"`** — import an already-statted actor from a compendium pack. Returns `{ id, name, type, folder, sourcePack, sourceDocId }`.
+- **`action: "update"`** — patch an existing actor (at least one of `name`/`img`/`system`/`prototypeToken` required). Use this to tweak HP/stats/name/portrait after import instead of recreating. Returns `{ actorId, fieldsUpdated }`.
+- **`action: "delete"`** — permanent (Foundry's undo does not cover deletes). Call `actor_write({action:"update"})` snapshots, `get_actor`, or `snapshot_actors` first if any data needs to be preserved. Returns `{ id, name, type, deleted: true }`.
 
-### `create_actor`
-Create a brand-new actor in the world. System-agnostic — `system` is the system-specific data block.
+### `actor_items`
+Manage embedded items (weapons, spells, gear, features) on an existing actor. The `action` discriminator selects the operation. Merges the old `add_items_to_actor` / `update_item_on_actor` / `delete_items_from_actor` tools.
 
-> **Call `get_data_model({type:"Actor", subtype:"<type>"})` first** if you don't already know the shape for the active system. Without that, you'll likely produce a malformed actor.
-
+- **Discriminator**: `action` — `"add"`, `"update"`, or `"delete"`.
 - **Params**:
-  - `name` — actor name.
-  - `type` — system-specific actor subtype (e.g. `"character"`, `"npc"` for dnd5e).
-  - `system` (optional) — system-specific data object.
-  - `items` (optional) — inline items to attach at creation. Each entry is either `{ pack, documentId, nameOverride? }` (compendium ref) or `{ name, type, system?, ... }` (inline).
-  - `img` (optional) — portrait path/URL.
-  - `prototypeToken` (optional) — prototype token data.
-  - `folderId` / `folderName` (optional) — same semantics as `create_actor_from_compendium`.
-- **Returns**: `{ id, name, type, folder, itemIds }`.
+  - `action` (required) — actor-item operation.
+  - `actorId` (required) — actor document id.
+  - `items?` **[add]** — array of `{ pack, documentId, nameOverride? }` (compendium ref) or `{ name, type, system?, ... }` (inline) entries.
+  - `itemId?` **[update]** — embedded item id.
+  - `data?` **[update]** — fields to merge into the item. Top-level fields (`name`, `img`) and `system.*` sub-paths are all accepted; Foundry's diff-update semantics apply.
+  - `itemIds?` **[delete]** — array of embedded item ids to remove.
+  - `audit?` — see [`audit`](#audit-optional-mutating-tools-only).
+- **`action: "add"`** — Returns `{ actorId, added: [{ id, name, source }] }` — `source` is `"<pack>/<docId>"` for compendium imports or `"inline"`.
+- **`action: "update"`** — Returns `{ actorId, itemId, fieldsUpdated: [...] }`.
+- **`action: "delete"`** — Returns `{ actorId, deleted: [{ id, name, type }], missing: [ids] }` — `missing` lists ids that weren't on the actor (the rest are deleted).
 
-### `add_items_to_actor`
-Add embedded items (weapons, spells, gear, features) to an existing actor.
+### `actor_ownership`
+Read or set an actor's ownership map. The `action` discriminator selects the operation. Merges the old `get_actor_ownership` / `set_actor_ownership` tools.
 
+- **Discriminator**: `action` — `"get"` or `"set"`.
 - **Params**:
-  - `actorId` — actor document id.
-  - `items` — array of `{ pack, documentId, nameOverride? }` (compendium) or `{ name, type, system?, ... }` (inline) entries.
-- **Returns**: `{ actorId, added: [{ id, name, source }] }` — `source` is `"<pack>/<docId>"` for compendium imports or `"inline"`.
+  - `action` (required) — ownership operation.
+  - `actorId` (required) — actor document id.
+  - `ownership?` **[set]** — a map of `{ user → level }`, **merged** with existing ownership.
+    - **Keys** can be `"default"` (every user not explicitly listed), a userId, or a case-sensitive userName.
+    - **Levels** can be string names (`"NONE"`, `"LIMITED"`, `"OBSERVER"`, `"OWNER"`, `"INHERIT"`) or the corresponding ints (`0`–`3`, or `-1` for INHERIT).
+    - To clear a user's permission, pass them as `"NONE"` explicitly — omitting them leaves their existing level intact.
+  - `audit?` — see [`audit`](#audit-optional-mutating-tools-only).
+- **`action: "get"`** — Returns `{ actorId, actorName, default: "<level>", users: [{ userId, userName, role, active, level }] }`.
+- **`action: "set"`** — Returns `{ actorId, actorName, changed: [...] }` — `changed` lists each user whose level was applied, with the resolved userId.
 
-### `create_journal_entry`
-Create a journal entry with one or more pages.
+**Example** — give Bob full control, lock everyone else out:
+```json
+{
+  "action": "set",
+  "actorId": "abc123",
+  "ownership": { "default": "NONE", "Bob": "OWNER" }
+}
+```
 
+### `journal`
+Manage journal entries and their pages. The `action` discriminator selects the operation. Merges the old `create_journal_entry` / `add_page_to_journal_entry` / `update_journal_page` / `delete_journal_page` / `delete_journal_entry` tools.
+
+- **Discriminator**: `action` — `"create"`, `"addPage"`, `"updatePage"`, `"deletePage"`, or `"delete"`.
 - **Params**:
-  - `name` — journal entry name (sidebar label).
-  - `pages` — non-empty array of `{ name, type?, text?: { content, format? }, src? }`.
-    - `type` defaults to `"text"`. Other values: `"image"`, `"pdf"`, `"video"` (use `src`).
-    - `text.format` defaults to `1` (HTML). `2` is Markdown.
-  - `folderId` / `folderName` (optional) — same semantics as the other writes. Auto-created as a `JournalEntry` folder if needed.
-- **Returns**: `{ id, name, folder, pageIds }`.
-
-### `update_journal_page`
-Update a journal page's name and/or text content. Designed for **iterative writing** — first call creates a skeleton via `create_journal_entry`, follow-up calls flesh it out.
-
-- **Params**:
-  - `journalId` — parent journal entry id.
-  - `pageId` — page id within that journal.
-  - `name` (optional) — replace page name.
-  - `content` (optional) — replace page body wholesale.
-  - `appendContent` (optional) — append to existing body. Ignored if `content` is also given.
-- **Returns**: `{ journalId, pageId, fieldsUpdated }` — `fieldsUpdated` lists which fields actually changed (`"name"`, `"text.content (replaced)"`, `"text.content (appended)"`).
-
-### `delete_folder`
-Delete a folder by id. By default Foundry **orphans** the contained documents (sets their `folder` to null). Pass `deleteContents: true` to wipe contents and subfolders too. Permanent.
-
-- **Params**:
-  - `folderId` — folder document id.
-  - `deleteContents` (optional, default `false`) — if `true`, delete every document and subfolder inside the folder too.
-- **Returns**: `{ id, name, type, deleted: true, deleteContents }`.
-
-### `delete_actor`
-Delete an actor by id. Permanent. Call `get_actor` or `snapshot_actor` first if any data needs to be preserved.
-
-- **Params**: `actorId`.
-- **Returns**: `{ id, name, type, deleted: true }`.
-
-### `update_actor`
-Patch an existing actor's top-level fields and/or system data. Use this to tweak HP/stats/name/portrait after `create_actor_from_compendium` instead of recreating the actor from scratch. At least one update field is required.
-
-- **Params**:
-  - `actorId` — actor document id.
-  - `name` (optional) — replace the actor's name.
-  - `img` (optional) — replace the portrait image path/URL.
-  - `system` (optional) — object merged into the actor's `system` data. Use `get_data_model` to learn the active system's shape.
-  - `prototypeToken` (optional) — object merged into the prototype token (affects future tokens placed from this actor).
-- **Returns**: `{ actorId, fieldsUpdated }`.
-
-### `delete_items_from_actor`
-Remove embedded items from an actor by id.
-
-- **Params**:
-  - `actorId` — actor document id.
-  - `itemIds` — array of embedded item ids.
-- **Returns**: `{ actorId, deleted: [{ id, name, type }], missing: [ids] }` — `missing` lists ids that weren't on the actor (the rest are deleted).
-
-### `update_item_on_actor`
-Patch a single embedded item on an actor. `data` is merged into the item document — top-level fields (`name`, `img`) and `system.*` sub-paths are all accepted.
-
-- **Params**:
-  - `actorId` — actor document id.
-  - `itemId` — embedded item id.
-  - `data` — object of fields to merge.
-- **Returns**: `{ actorId, itemId, fieldsUpdated: [...] }`.
-
-### `delete_journal_entry`
-Delete a journal entry and all of its pages. Permanent.
-
-- **Params**: `journalId`.
-- **Returns**: `{ id, name, pageCount, deleted: true }`.
-
-### `delete_journal_page`
-Delete a single page from a journal entry. The entry itself remains.
-
-- **Params**: `journalId`, `pageId`.
-- **Returns**: `{ journalId, pageId, name, deleted: true }`.
-
-### `add_page_to_journal_entry`
-Add a new page to an existing journal entry. Page shape matches `create_journal_entry`'s `pages[]` entries.
-
-- **Params**:
-  - `journalId` — parent journal entry id.
-  - `page` — `{ name, type?, text?: { content, format? }, src? }`. Same fields as `create_journal_entry` pages.
-- **Returns**: `{ journalId, pageId, name }`.
+  - `action` (required) — journal operation.
+  - `name?` **[create]** journal entry name (sidebar label) / **[updatePage]** replace the page name.
+  - `pages?` **[create]** — non-empty array of `{ name, type?, text?: { content, format? }, src? }`. `type` defaults to `"text"` (other values `"image"`, `"pdf"`, `"video"` use `src`); `text.format` defaults to `1` (HTML), `2` is Markdown.
+  - `folderId?` **[create]** — target folder id.
+  - `folderName?` **[create]** — target folder by exact name. Auto-created as a `JournalEntry` folder if missing.
+  - `journalId?` **[addPage/updatePage/deletePage/delete]** — parent journal entry id.
+  - `pageId?` **[updatePage/deletePage]** — page id within that journal.
+  - `page?` **[addPage]** — `{ name, type?, text?: { content, format? }, src? }`. Same shape as a `create` `pages[]` entry.
+  - `content?` **[updatePage]** — replace the page body wholesale.
+  - `appendContent?` **[updatePage]** — append to the existing body. Ignored if `content` is also given.
+  - `audit?` — see [`audit`](#audit-optional-mutating-tools-only).
+- **`action: "create"`** — create an entry with one or more pages. Returns `{ id, name, folder, pageIds }`.
+- **`action: "addPage"`** — append a page to an existing entry. Returns `{ journalId, pageId, name }`.
+- **`action: "updatePage"`** — designed for **iterative writing** (first `create` a skeleton, then flesh it out). Returns `{ journalId, pageId, fieldsUpdated }` — `fieldsUpdated` lists which fields changed (`"name"`, `"text.content (replaced)"`, `"text.content (appended)"`).
+- **`action: "deletePage"`** — delete one page; the entry remains. Returns `{ journalId, pageId, name, deleted: true }`.
+- **`action: "delete"`** — delete the entry and all its pages (permanent). Returns `{ id, name, pageCount, deleted: true }`.
 
 ### `create_token`
 Place a new token for an actor onto a scene. Defaults to the active scene when `sceneId` is omitted. Pass coordinates as **either** pixels OR cells — cell coords win if both are provided.
@@ -793,31 +771,100 @@ Place a new token for an actor onto a scene. Defaults to the active scene when `
 
 The token inherits the actor's **prototype token** — image, scale, vision, disposition, etc. all carry over.
 
-### `set_actor_ownership`
-Set ownership levels on an actor. The `ownership` param is a map of `{ user → level }`.
+### `scene`
+Create, update, activate, or delete a scene. The `action` discriminator selects the operation. Merges the old `create_scene` / `update_scene` / `activate_scene` / `delete_scene` tools.
 
-- **Keys** can be:
-  - `"default"` — applies to every Foundry user not explicitly listed.
-  - A userId (exact match against `game.users`).
-  - A userName (case-sensitive exact match).
-- **Levels** can be string names (`"NONE"`, `"LIMITED"`, `"OBSERVER"`, `"OWNER"`, `"INHERIT"`) or the corresponding ints (0–3, or -1 for INHERIT).
-- **Merging:** the map is merged with existing ownership. To clear a user's permission, pass them as `"NONE"` explicitly — omitting them leaves their existing level intact.
-- **Params**: `actorId`, `ownership` (the map above).
-- **Returns**: `{ actorId, actorName, changed: [...] }` — `changed` lists each user whose level was applied, with the resolved userId.
+- **Discriminator**: `action` — `"create"`, `"update"`, `"activate"`, or `"delete"`.
+- **Params**:
+  - `action` (required) — scene operation.
+  - `sceneId?` **[update]** target scene id / **[activate/delete]** scene document id (preferred — unambiguous).
+  - `sceneName?` **[activate/delete]** — scene name (exact match). Used only if `sceneId` is omitted.
+  - `name?` **[create]** scene name (sidebar label) / **[update]** new scene name.
+  - `width?` **[create]** — width in pixels. Default 4000.
+  - `height?` **[create]** — height in pixels. Default 3000.
+  - `gridType?` **[create]** — `CONST.GRID_TYPES` value (0=Gridless, 1=Square, 2–5=Hex variants). Default 1.
+  - `gridSize?` **[create]** — grid cell size in pixels. Default 100.
+  - `gridAlpha?` **[create]** — grid line alpha (0.0–1.0). Default 0.2.
+  - `folderId?` **[create]** — parent folder id (Scene type).
+  - `activate?` **[create]** — activate after creating. Default true.
+  - `padding?` **[create/update]** — outer padding (0.0–0.5). Default 0.25.
+  - `backgroundColor?` **[create/update]** — hex background color. Default `"#1c1c1c"`.
+  - `background?` **[create/update]** — background image path or data object (e.g. `{src: "path/to/image.webp"}`). On v14, background fields map to `Level.background` and transforms to `Level.textures`.
+  - `foreground?` **[create/update]** — foreground texture data; Level-backed on v14.
+  - `levelFog?` **[create/update]** — level fog texture data `{src, tint}`; v14 only.
+  - `fog?` **[create/update]** — scene fog config, e.g. `{mode: 0|1|2, colors}`.
+  - `fogExploration?` **[create/update]** — compatibility boolean. On v14 update maps `false`→`fog.mode 0` and `true`→`fog.mode 1`.
+  - `grid?` **[update]** — grid object (e.g. `{size: 100, type: 1, alpha: 0.2}`).
+  - `navigation?` **[update]** — whether the scene appears in the navigation bar.
+  - `sort?` **[update]** — navigation sort order.
+  - `navName?` **[update]** — short name shown in the navigation bar.
+  - `initial?` **[update]** — initial view config (e.g. `{level: "<levelId>", x, y, scale}`).
+  - `force?` **[delete]** — set true to delete even if the scene is currently active. Default false.
+  - `audit?` — see [`audit`](#audit-optional-mutating-tools-only).
+- **`action: "create"`** — activates the new scene unless `activate: false`.
+- **`action: "update"`** — patches the whitelisted fields above, preserving the rest.
+- **`action: "activate"`** — switches the canvas to view the scene.
+- **`action: "delete"`** — permanent; `force: true` is required to delete the active scene.
 
-**Example** — give Bob full control, lock everyone else out:
-```json
-{
-  "actorId": "abc123",
-  "ownership": { "default": "NONE", "Bob": "OWNER" }
-}
-```
+### `scene_level`
+Manage levels (floors) of a multi-level scene. **v14 only** — `scene.levels` is a v14-native EmbeddedCollection. The `action` discriminator selects the operation. Merges the old `add_scene_level` / `update_scene_level` / `remove_scene_level` tools.
 
-### `get_actor_ownership`
-Read the current ownership map of an actor with friendly level names.
+- **Discriminator**: `action` — `"add"`, `"update"`, or `"remove"`.
+- **Params**:
+  - `action` (required) — scene-level operation.
+  - `sceneId` (required) — target scene id.
+  - `name?` **[add]** level name (e.g. `"Ground"`, `"Upper"`, `"Basement"`) / **[update]** new level name.
+  - `bottom?` **[add]** lower bound of the elevation range (in feet) / **[update]** new lower bound.
+  - `top?` **[add]** upper bound of the elevation range (in feet) / **[update]** new upper bound.
+  - `levelId?` **[update/remove]** — level document id.
+  - `audit?` — see [`audit`](#audit-optional-mutating-tools-only).
+- **`action: "add"`** — returns the new level's id, name, and elevation range.
+- **`action: "update"`** — changes the given fields, preserving the rest.
+- **`action: "remove"`** — deletes a level; refuses on the only remaining one. Permanent.
 
-- **Params**: `actorId`.
-- **Returns**: `{ actorId, actorName, default: "<level>", users: [{ userId, userName, role, active, level }] }`.
+### `region`
+Manage Regions (v13+) on a scene. Use `list_region_behavior_types` for behavior subtype schemas. The `action` discriminator selects the operation. Merges the old `create_region` / `update_region` / `delete_region` tools.
+
+- **Discriminator**: `action` — `"create"`, `"update"`, or `"delete"`.
+- **Params**:
+  - `action` (required) — region operation.
+  - `sceneId` (required) — target scene id.
+  - `name?` **[create]** — region name.
+  - `shapes?` **[create]** — non-empty array of RegionShape data (e.g. `{type:"rectangle", x, y, width, height}`).
+  - `behaviors?` **[create]** — RegionBehavior data (e.g. `{type:"executeScript", system:{source}}`).
+  - `levels?` **[create]** — level ids the region applies to.
+  - `color?` **[create]** — hex color for the region overlay.
+  - `visibility?` **[create]** — visibility level (0–4 per Foundry's enum).
+  - `locked?` **[create]** — lock the region from interactive selection.
+  - `elevation?` **[create]** — override elevation range `{bottom, top}`.
+  - `ownership?` **[create]** — per-user ownership map.
+  - `regionId?` **[update/delete]** — region document id.
+  - `patch?` **[update]** — fields to merge into the region (dotted paths like `elevation.bottom` accepted; e.g. `{visibility: 0, locked: false}`).
+  - `audit?` — see [`audit`](#audit-optional-mutating-tools-only).
+- **`action: "delete"`** — permanent.
+
+### `list_scenes`
+List every scene in the world. Use to enumerate available scenes when you only know a name fragment or need to find which scene is currently active.
+
+- **Params**: none.
+- **Returns**: `[{ id, name, active, folder }]` per scene.
+
+### `place_measured_template`
+Drop a MeasuredTemplate onto a scene (fireball circle, cone, wall ray, rectangle) for spell areas of effect. The template is created immediately at the given coordinates — no preview/place UX.
+
+- **Params**:
+  - `type?` — `"circle"` (default), `"cone"`, `"rect"`, or `"ray"`.
+  - `x`, `y` (required) — pixel coordinates of the template origin.
+  - `distance` (required) — template distance in grid units (e.g. 20 for a 20ft cone).
+  - `direction?` — direction in degrees (for cone/ray). Default 0.
+  - `angle?` — cone angle in degrees. Default 53 for cones, 0 otherwise.
+  - `width?` — ray width (for `type="ray"`). Default 0.
+  - `fillColor?` — hex color for the template fill. Defaults to the user's color.
+  - `texture?` — optional texture image path overlaying the template.
+  - `flags?` — module flags to attach (e.g. `{ "spell-effects": { name: "fireball" } }`).
+  - `sceneId?` — target scene id. Default: active scene.
+  - `hidden?` — create hidden to non-GMs. Default false.
+  - `audit?` — see [`audit`](#audit-optional-mutating-tools-only).
 
 ---
 
@@ -825,35 +872,29 @@ Read the current ownership map of an actor with friendly level names.
 
 These tools use system-native APIs to handle modifiers, advantage, and formatting correctly. Supported systems: `dnd5e`, `pf2e`, `shadowdark`, `vagabond`.
 
-### `request_roll_typed`
-Triggers a system-native roll (Skill, Ability, or Save) on an actor. Normalizes the result into a canonical shape.
+### `request_check`
+Triggers a system-native skill, ability, or save check on an actor. Handles system-specific modifiers and formatting; dialogs always suppressed. Normalizes the result into a canonical shape. (Replaces the removed `request_roll_typed` — same behavior, canonical name.)
 - **actorId**: ID or name of the actor.
 - **type**: `skill`, `ability`, or `save`.
-- **identifier**: System-specific slug (e.g., `ath` for 5e Athletics, `fortitude` for PF2e).
-- **dc**: (Optional) Target number for success evaluation.
-- **adv**: (Optional) `advantage`, `disadvantage`, or `normal`.
-- **fastForward**: (Optional) Bypass dialogs (default true).
-
-### `request_attack_roll`
-Triggers only the attack roll part of an item's workflow.
-- **actorId**: ID or name of the actor.
-- **itemId**: ID or name of the weapon/spell.
-- **adv**: (Optional) Advantage state.
-- **fastForward**: (Optional) default true.
-
-### `request_damage_roll`
-Triggers the damage roll for an item. The caller must provide critical state.
-- **actorId**: ID or name of the actor.
-- **itemId**: ID or name of the weapon/spell.
-- **isCritical**: (Optional) Force critical damage.
+- **identifier**: System-specific slug (e.g. `ath` for 5e Athletics, `athletics` for PF2e, `str` for Shadowdark).
+- **dc**: (Optional) Target DC for success evaluation.
+- **adv**: (Optional) `advantage`, `disadvantage`, or `normal` (dnd5e + shadowdark only; ignored elsewhere).
 
 ### `request_item_use`
-The recommended tool for combat. Executes a full workflow: Attack -> (on hit) -> Damage -> (optional) Apply.
-- **actorId**: ID or name of the actor using the item.
-- **itemId**: ID or name of the item.
-- **targetIds**: (Optional) Apply damage to these IDs if the attack hits.
-- **adv**: (Optional) Advantage state for the attack.
-- **Returns**: A chained result object containing attack, damage, and application details.
+Trigger an item's combat workflow. The `phase` discriminator selects which part runs and which params apply; dialogs always suppressed. Merges the old single `request_item_use` plus `request_attack_roll` and `request_damage_roll`.
+
+- **Discriminator**: `phase` — `"full"` (default), `"attack"`, or `"damage"`.
+- **Params**:
+  - `phase?` — which workflow part to run.
+  - `actorId` (required) — actor id or name.
+  - `itemId` (required) — item/weapon id or name.
+  - `targetIds?` **[full]** — if provided, damage is applied to these targets on hit.
+  - `activityId?` **[full/attack]** — D&D 5e activity id (when an item has multiple attack activities).
+  - `adv?` **[full/attack]** — `"normal"`, `"advantage"`, or `"disadvantage"` (system-dependent).
+  - `isCritical?` **[damage]** — force critical damage (doubles dice on d20 systems).
+- **`phase: "full"`** (default, recommended for combat) — full Attack -> Hit? -> Damage -> (optional) Apply workflow. Threads crit state from the attack into damage automatically. Returns a chained result object (attack, damage, application details).
+- **`phase: "attack"`** — only the attack roll.
+- **`phase: "damage"`** — only the damage roll; caller supplies crit state. Does NOT re-roll the attack — fetches the activity/strike directly from the item.
 
 ### `apply_damage`
 Applies damage to one or more targets with mixed outcomes (e.g., fireball with some targets saving).
@@ -868,11 +909,11 @@ Applies damage to one or more targets with mixed outcomes (e.g., fireball with s
 1. `get_game_info` → confirms bridge alive, tells you the system.
 2. `get_scene` → lists tokens on the map with their positions.
 3. `get_token_details <name>` → deep info on one token.
-4. `capture_scene` → visual confirmation with grid labels.
+4. `screenshot { target: "scene_grid" }` → visual confirmation with grid labels.
 
 **Debugging flow** — "something's broken":
 1. `get_console_errors` → see what's been throwing in the browser.
-2. `trace_hook "relevantHook"` → learn what args the hook receives.
+2. `trace_hooks { hooks: ["relevantHook"] }` → learn what args the hook receives.
 3. `evaluate "return <some probe>;"` → prototype against live game state.
 4. Add a proper handler to `bridge.js` once you know what works.
 
@@ -882,8 +923,8 @@ Applies damage to one or more targets with mixed outcomes (e.g., fireball with s
 3. Inspect the returned chat messages for hit/miss/damage.
 
 **Visual verify after mutation**:
-1. `move_token_pathed` to a target cell.
-2. `capture_scene` → confirm the grid position visually.
+1. `move_token { pathed: true }` to a target cell.
+2. `screenshot { target: "scene_grid" }` → confirm the grid position visually.
 
 **Rigged dice key rules**:
 - `rig` works on `roll`, `use_item`, and `click`.

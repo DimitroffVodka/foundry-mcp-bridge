@@ -31,6 +31,26 @@ All notable changes to Foundry MCP Live are documented in this file.
 - `trace_workflow` Midi presets must be triggered via `use_item` (not
   `request_item_use`, which bypasses Midi) — documented.
 
+### Changed
+
+- **Tool consolidation — BREAKING tool renames, ~96 → ~67 tools.** Same
+  capabilities, far fewer entries, to cut LLM context cost and stay under client
+  tool-count caps (Cursor ~80). Merged families take an `action`/`target`/
+  `phase`/`pathed` discriminator and route to the unchanged Foundry bridge
+  handlers (server-side only):
+  - `folder`, `actor_write`, `actor_items`, `actor_ownership`, `journal`,
+    `scene`, `scene_level`, `region`, `combat` replace their separate
+    create/update/delete/activate/etc. tools.
+  - `screenshot` (`target`: canvas|dom|scene_grid) replaces screenshot /
+    screenshot_dom / capture_scene.
+  - `move_token` (`pathed` flag) replaces move_token / move_token_pathed.
+  - `request_item_use` (`phase`: full|attack|damage) replaces request_item_use /
+    request_attack_roll / request_damage_roll; the `full` phase keeps its
+    per-target timeout scaling.
+  - Removed redundant `trace_hook` (use `trace_hooks`), `snapshot_actor` /
+    `diff_actor` (use `snapshot_actors` / `diff_with`), and the deprecated
+    `request_roll_typed` (use `request_check`).
+
 ## [0.16.0] - 2026-06-11
 
 ### Added
