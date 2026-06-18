@@ -126,7 +126,27 @@ export function safeSerializeHookArg(val, depth = 0, maxDepth = 3) {
       uuid: val.uuid ?? null
     };
   }
-  
+
+  // Foundry placeables (Token, Tile, Template, …) — the canvas object wraps a
+  // document. Summarise to the underlying document; the PIXI internals
+  // (transform, _bounds, _events, …) are pure noise in a hook trace. Common in
+  // Midi-QOL hook args, where the workflow carries the attacker token.
+  if (val?.document?.documentName) {
+    const d = val.document;
+    return {
+      _placeable: d.documentName,
+      id:   d.id   ?? null,
+      name: d.name ?? null,
+      uuid: d.uuid ?? null
+    };
+  }
+
+  // Bare PIXI display objects (anything with a transform + bounds) — never
+  // useful in a trace; collapse to a tag rather than dumping the scene graph.
+  if (val?.transform && val?._bounds !== undefined) {
+    return `[PIXI ${val.constructor?.name || "DisplayObject"}]`;
+  }
+
   let valToSerialize = val;
   if (val instanceof Map) valToSerialize = Object.fromEntries(val);
   else if (val instanceof Set) valToSerialize = Array.from(val);
@@ -227,6 +247,22 @@ function buildUndo(toolName, before, after, diff) {
  * The main mutation wrapper.
  */
 export async function runAuditedMutation(toolName, params, capturePlan, executeFn) {
+  // GM "read-only mode" master switch — this is the single chokepoint every
+  // world-mutating tool flows through, so the gate lives here. When the GM has
+  // turned "Allow AI to modify the world" off, refuse before doing anything.
+  // Fails OPEN (allows) if the setting can't be read (e.g. not yet registered
+  // during init), and only blocks on an explicit `false`.
+  let mutationsAllowed = true;
+  try { mutationsAllowed = game.settings.get("foundry-mcp-live", "allowWorldMutations") !== false; }
+  catch { mutationsAllowed = true; }
+  if (!mutationsAllowed) {
+    throw new Error(
+      `World mutations are disabled by the GM — "${toolName}" was refused. `
+      + `The AI bridge is in read-only mode. A GM can re-enable it in Foundry → `
+      + `Settings → Configure Settings → Foundry MCP Live → "Allow AI to modify the world".`
+    );
+  }
+
   // Audit must be opt-in; check this BEFORE any logging or work. Earlier
   // builds logged here unconditionally and spammed Foundry's console on
   // every non-audited mutation.

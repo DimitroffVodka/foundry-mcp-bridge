@@ -28,6 +28,16 @@ const RECONNECT_DELAY = 5000;
 const MAX_ERRORS = 1000;
 const evaluationJobs = createRuntimeJobStore();
 
+// Wire-protocol version the module speaks. Must match the server's
+// PROTOCOL_VERSION (server/lib/config.js). Bump both together only on a
+// breaking handshake/tool change.
+const MODULE_PROTOCOL_VERSION = 1;
+// If the server doesn't answer the hello with a `hello-ack` within this
+// window, it predates version reporting → treat as out of date.
+const SERVER_ACK_TIMEOUT_MS = 6000;
+let serverAckTimer = null;      // pending "did the server identify itself?" timer
+let serverOutdatedNotified = false; // show the blocking dialog at most once/session
+
 async function _runEvaluation(expression) {
   const t0 = performance.now();
   try {
@@ -4191,6 +4201,96 @@ const handlers = {
 let ws = null;
 let reconnectTimer = null;
 
+/**
+ * Compare the server's reported version/protocol against ours and warn the
+ * user if the server is too old. The server is the headless half with no
+ * update notifications of its own, so this is how a stale server surfaces.
+ */
+function checkServerVersion(serverVersion, serverProtocol) {
+  const moduleVersion = game.modules.get(MODULE_ID)?.version || "0.0.0";
+  const olderByProtocol = Number.isInteger(serverProtocol)
+    ? serverProtocol < MODULE_PROTOCOL_VERSION
+    : true; // missing protocol field → old server
+  const olderByVersion = serverVersion
+    ? foundry.utils.isNewerVersion(moduleVersion, serverVersion)
+    : true; // missing version → old server
+  if (olderByProtocol || olderByVersion) {
+    warnServerOutdated(serverVersion, serverProtocol);
+  } else {
+    serverOutdatedNotified = false; // server is current again; re-arm dialog
+  }
+}
+
+/**
+ * Surface a stale server: a sticky warning toast (every reconnect) plus a
+ * one-time modal with platform-specific update instructions for the GM.
+ */
+function warnServerOutdated(serverVersion, _serverProtocol) {
+  const moduleVersion = game.modules.get(MODULE_ID)?.version || "?";
+  const shown = serverVersion || "unknown (no version response)";
+  const toast = `Foundry MCP: the MCP server (v${shown}) is older than this module (v${moduleVersion}). `
+    + `Update and restart the server — see the module README.`;
+  ui.notifications?.warn(toast, { permanent: true });
+
+  if (serverOutdatedNotified || !game.user?.isGM) return;
+  serverOutdatedNotified = true;
+
+  const DialogV2 = foundry.applications?.api?.DialogV2;
+  if (!DialogV2) return;
+  // Raw command text (what the Copy buttons put on the clipboard — plain, so it
+  // pastes cleanly into a terminal or an AI assistant).
+  const STEPS = {
+    linux: "cd ~/foundry-mcp-live && git pull\ncd server && npm install\nsystemctl --user restart foundry-mcp-live",
+    manual: "git pull            # or re-download the latest release\ncd server && npm install\n# then restart the server: start.bat (Windows) or start.sh (Linux/macOS)",
+  };
+  // Opens the README's "Updating the server" section in a new browser tab.
+  const GUIDE_URL = "https://github.com/DimitroffVodka/foundry-mcp-live#updating-the-server";
+  const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const preStyle = "user-select:text;white-space:pre-wrap;word-break:break-word;padding:6px 8px;border-radius:4px;border:1px solid var(--color-border-light-tertiary,#666)";
+  const block = (label, key) => `
+    <div style="display:flex;align-items:center;gap:8px;margin:6px 0 2px">
+      <strong style="user-select:text">${label}</strong>
+      <button type="button" data-mcp-copy="${key}" style="flex:0 0 auto;padding:1px 10px;width:auto">Copy</button>
+    </div>
+    <pre style="${preStyle}">${esc(STEPS[key])}</pre>`;
+  const content = `
+    <div style="user-select:text">
+      <p style="user-select:text"><strong>The Foundry MCP <em>server</em> is out of date.</strong> &nbsp;Module <code>v${moduleVersion}</code> • Server <code>v${esc(shown)}</code>.</p>
+      <p style="user-select:text">The server is a separate program from this module and has to be updated and restarted on its own. Run the commands for your system below. <em>Not sure what they do?</em> Click <strong>Copy</strong> and paste them to whoever set up your server — or into an AI assistant — and ask it to walk you through.</p>
+      <p style="margin:8px 0"><button type="button" data-mcp-open style="width:auto;padding:3px 14px">📖 Open the full update guide</button></p>
+      ${block("Linux (systemd service)", "linux")}
+      ${block("Windows / macOS / manual", "manual")}
+      <p style="user-select:text"><code>npm install</code> matters — dependency-only fixes won't apply from <code>git pull</code> alone.</p>
+    </div>`;
+
+  // Wire the Copy buttons once the dialog renders (clipboard works on localhost).
+  Hooks.once("renderDialogV2", (app) => {
+    const root = app?.element;
+    if (!root) return;
+    root.querySelectorAll("[data-mcp-copy]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        try {
+          await navigator.clipboard.writeText(STEPS[btn.dataset.mcpCopy] || "");
+          ui.notifications?.info("Copied — paste it into a terminal or an AI assistant.");
+          const prev = btn.textContent; btn.textContent = "Copied ✓";
+          setTimeout(() => { btn.textContent = prev; }, 2000);
+        } catch {
+          ui.notifications?.warn("Couldn't copy automatically — select the text and press Ctrl+C.");
+        }
+      });
+    });
+    const openBtn = root.querySelector("[data-mcp-open]");
+    if (openBtn) openBtn.addEventListener("click", () => window.open(GUIDE_URL, "_blank", "noopener"));
+  });
+
+  DialogV2.prompt({
+    window: { title: "Foundry MCP — server update needed" },
+    position: { width: 580 },
+    content,
+    ok: { label: "Got it" },
+  }).catch(() => {});
+}
+
 function connect() {
   if (ws?.readyState === WebSocket.OPEN || ws?.readyState === WebSocket.CONNECTING) return;
 
@@ -4220,12 +4320,24 @@ function connect() {
       worldId:  game.world?.id || "",
       systemId: game.system?.id || "",
       foundryVersion: game.version || "",
+      // Version handshake — lets the server log/refuse a too-old module, and
+      // (via the hello-ack reply) lets us warn the user if the SERVER is stale.
+      moduleVersion:   game.modules.get(MODULE_ID)?.version || "",
+      protocolVersion: MODULE_PROTOCOL_VERSION,
     };
     try {
       const t = localStorage.getItem("mcpBridgeToken");
       if (t) helloFrame.token = t;
     } catch { /* ignore */ }
     ws.send(JSON.stringify(helloFrame));
+
+    // Expect a `hello-ack` carrying the server's version. If none arrives, the
+    // server is older than this feature → it's out of date.
+    if (serverAckTimer) clearTimeout(serverAckTimer);
+    serverAckTimer = setTimeout(() => {
+      serverAckTimer = null;
+      warnServerOutdated(null, null);
+    }, SERVER_ACK_TIMEOUT_MS);
   });
 
   ws.addEventListener("message", async (event) => {
@@ -4233,6 +4345,13 @@ function connect() {
     try {
       request = JSON.parse(event.data);
     } catch {
+      return;
+    }
+
+    // Server identity reply (not a tool call) — version compatibility check.
+    if (request.type === "hello-ack") {
+      if (serverAckTimer) { clearTimeout(serverAckTimer); serverAckTimer = null; }
+      checkServerVersion(request.serverVersion, request.protocolVersion);
       return;
     }
 
@@ -4254,6 +4373,7 @@ function connect() {
   });
 
   ws.addEventListener("close", () => {
+    if (serverAckTimer) { clearTimeout(serverAckTimer); serverAckTimer = null; }
     console.log(`${MODULE_ID} | Disconnected from MCP server, retrying in ${RECONNECT_DELAY / 1000}s...`);
     scheduleReconnect();
   });
@@ -4270,6 +4390,28 @@ function scheduleReconnect() {
     connect();
   }, RECONNECT_DELAY);
 }
+
+// ---------------------------------------------------------------------------
+// Settings — GM-only "read-only mode" master switch
+// ---------------------------------------------------------------------------
+// World-scoped (GM-editable), default ON so existing setups are unchanged.
+// When turned OFF, every world-mutating tool refuses at the runAuditedMutation
+// chokepoint (audit.js) and the bridge becomes read-only — no server restart
+// needed. This sits *inside* the server's env ceiling: creating/deleting
+// persistent content (the FOUNDRY_MCP_ALLOW_WRITE tools) still also requires
+// that env gate, which the AI cannot change. `evaluate` remains env-only.
+Hooks.once("init", () => {
+  game.settings.register(MODULE_ID, "allowWorldMutations", {
+    name: "Allow AI to modify the world",
+    hint: "When on, the AI may change actors, tokens, combat, scenes, and chat. "
+        + "Turn off to make the bridge read-only without restarting the server. "
+        + "(Creating/deleting persistent content also requires the server's write permission.)",
+    scope: "world",
+    config: true,
+    type: Boolean,
+    default: true,
+  });
+});
 
 // ---------------------------------------------------------------------------
 // Foundry hook — connect once the game is ready
