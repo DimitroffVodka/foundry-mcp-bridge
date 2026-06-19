@@ -2,6 +2,27 @@
 
 All notable changes to Foundry MCP Live are documented in this file.
 
+## [0.17.1] - 2026-06-19
+
+### Fixed
+
+- **Module now loads on Foundry V13 again.** `compatibility.minimum` had been
+  raised to `"14"` in v0.11.3, which made Foundry V13 silently drop the package
+  at world load — it never registered, so `game.modules.get("foundry-mcp-live")`
+  returned `undefined` and the module was invisible despite installing fine in
+  The Forge. Lowered `minimum` back to `"13"` (`verified` stays `"14"`).
+
+### Changed
+
+- The five V14-only multi-level-scene tools (`get_scene_levels`,
+  `set_canvas_level`, `add_scene_level`, `update_scene_level`,
+  `remove_scene_level`) now degrade cleanly on V13 instead of throwing cryptic
+  errors: `get_scene_levels` returns a clear "requires v14, single-level world"
+  note, and the four mutating tools fail with an explicit
+  "requires Foundry v14" message. Everything else is fully supported on V13.
+- Server bumped to 0.17.1 in lockstep with the module (no functional server
+  change) so the server-version handshake stays quiet after updating.
+
 ## [0.17.0] - 2026-06-18
 
 > **Updating the module does NOT update the server.** This release requires

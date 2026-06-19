@@ -23,6 +23,25 @@ import {
 import { runFoundrySelfTest } from "./self-test.js";
 
 const MODULE_ID = "foundry-mcp-live";
+
+/**
+ * Multi-level scenes — `scene.levels` and `Scene#view({level})` — are a
+ * Foundry v14-native feature absent on v13, where the module is otherwise
+ * fully supported (compatibility.minimum is "13"). These let the five level
+ * tools fail with one honest "requires v14" message instead of cryptic
+ * "no levels collection" errors.
+ */
+function sceneLevelsSupported() {
+  return Number(game.release?.generation) >= 14;
+}
+function requireSceneLevels(toolName) {
+  if (!sceneLevelsSupported()) {
+    throw new Error(
+      `${toolName} requires Foundry v14 — multi-level scenes are not available on Foundry v${game.release?.generation ?? "?"}.`
+    );
+  }
+}
+
 const WS_URL = "ws://localhost:3001";
 const RECONNECT_DELAY = 5000;
 const MAX_ERRORS = 1000;
@@ -3718,6 +3737,14 @@ const handlers = {
     const scene = params.sceneId ? game.scenes.get(params.sceneId) : (canvas.scene ?? game.scenes.active);
     if (!scene) throw new Error(params.sceneId ? `Scene "${params.sceneId}" not found` : "No active scene");
 
+    if (!sceneLevelsSupported()) {
+      return {
+        sceneId: scene.id, sceneName: scene.name, activeLevelId: null,
+        count: 0, levels: [],
+        note: `Multi-level scenes require Foundry v14 — this world is on v${game.release?.generation ?? "?"}, where every scene is single-level.`
+      };
+    }
+
     const collection = scene.levels;
     const arr = collection?.contents
             ?? (typeof collection?.values === "function" ? [...collection.values()] : (Array.isArray(collection) ? collection : []));
@@ -3748,6 +3775,7 @@ const handlers = {
    * Tries multiple Foundry APIs in order — version-defensive.
    */
   set_canvas_level: async (params = {}) => {
+    requireSceneLevels("set_canvas_level");
     const { sceneId, levelId, elevation } = params;
     if (!levelId && typeof elevation !== "number") {
       throw new Error("Provide either `levelId` or `elevation`");
@@ -3803,6 +3831,7 @@ const handlers = {
    * is a v14-native EmbeddedCollection. Returns the created level.
    */
   add_scene_level: async (params = {}) => {
+    requireSceneLevels("add_scene_level");
     return runAuditedMutation("add_scene_level", params, capturePlans.scene, async () => {
       const { sceneId, name, bottom, top } = params;
       if (!sceneId || !name) throw new Error("`sceneId` and `name` are required");
@@ -3825,6 +3854,7 @@ const handlers = {
    * either `bottom` or `top` (or both); whatever's omitted is preserved.
    */
   update_scene_level: async (params = {}) => {
+    requireSceneLevels("update_scene_level");
     return runAuditedMutation("update_scene_level", params, capturePlans.scene, async () => {
       const { sceneId, levelId } = params;
       if (!sceneId || !levelId) throw new Error("`sceneId` and `levelId` are required");
@@ -3858,6 +3888,7 @@ const handlers = {
    * remaining level — single-level scenes need at least one floor.
    */
   remove_scene_level: async (params = {}) => {
+    requireSceneLevels("remove_scene_level");
     return runAuditedMutation("remove_scene_level", params, capturePlans.scene, async () => {
       const { sceneId, levelId } = params;
       if (!sceneId || !levelId) throw new Error("`sceneId` and `levelId` are required");
