@@ -4,6 +4,12 @@ const USER_SELECT = `${JOIN_FORM} select[name="userid"]`;
 const PASSWORD_INPUT = `${JOIN_FORM} input[name="password"]`;
 const JOIN_BUTTON = `${JOIN_FORM} button[name="join"]`;
 
+// Headless clients have no GPU → Chromium rasterizes Foundry's WebGL canvas and
+// CSS animations on the CPU via SwiftShader (10+ cores). We never need the canvas
+// for a bridge client, so a headless relaunch disables it (`core.noCanvas`,
+// pre-seeded in localStorage before /game loads) and strips animations.
+const NO_ANIM_CSS = "*,*::before,*::after{animation:none!important;transition:none!important}";
+
 function parseFoundryUrl(value) {
   const input = String(value ?? "").trim();
   if (!input) return null;
@@ -129,7 +135,7 @@ export function createRelaunchHandler({
 
       const launchOptions = {
         executablePath: config.chromePath,
-        headless: false,
+        headless: !!config.headless,
         defaultViewport: null,
         args: [
           "--disable-background-timer-throttling",
@@ -152,6 +158,17 @@ export function createRelaunchHandler({
         timeout: pageTimeout,
       });
       await page.waitForSelector(USER_SELECT, { timeout: pageTimeout });
+
+      if (config.headless) {
+        // On the /join page (same origin) — seed the client-scoped "disable
+        // canvas" setting so the upcoming /game load skips the canvas entirely.
+        // Best-effort: a tuning optimization, never a correctness requirement.
+        try {
+          await page.evaluate(() => {
+            try { localStorage.setItem("core.noCanvas", "true"); } catch { /* ignore */ }
+          });
+        } catch { /* page may lack evaluate in tests / hardened pages */ }
+      }
 
       const users = await page.$eval(USER_SELECT, select =>
         Array.from(select.options).map(option => ({
@@ -189,6 +206,12 @@ export function createRelaunchHandler({
       while (Date.now() < deadline) {
         const connected = findMatchingBridge(bridges, validation, config.gmUser);
         if (connected) {
+          if (config.headless) {
+            // Bridge is up on /game — strip CSS animations so software-WebGL
+            // compositing doesn't spin. Best-effort.
+            try { await page.addStyleTag({ content: NO_ANIM_CSS }); }
+            catch { /* page may lack addStyleTag in tests */ }
+          }
           return {
             ready: true,
             alreadyConnected: false,

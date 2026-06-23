@@ -126,8 +126,13 @@ submitting the environment-only password, and waiting for the bridge.
 - **Required config**: `FOUNDRY_RELAUNCH_URL`,
   `FOUNDRY_RELAUNCH_GM_USER`, and `FOUNDRY_CHROME_PATH`.
 - **Optional config**: `FOUNDRY_RELAUNCH_GM_PASSWORD`,
-  `FOUNDRY_CHROME_USER_DATA_DIR`, and
-  `FOUNDRY_RELAUNCH_ALLOW_REMOTE=1`.
+  `FOUNDRY_CHROME_USER_DATA_DIR`, `FOUNDRY_RELAUNCH_ALLOW_REMOTE=1`, and
+  `FOUNDRY_RELAUNCH_HEADLESS=1` — run the recovery client headless. A headless
+  client has no GPU, so it also disables the Foundry canvas (`core.noCanvas`,
+  pre-seeded before `/game` loads) and strips CSS animations, otherwise software
+  WebGL (SwiftShader) pegs the CPU. Trade-off: a headless client can't serve
+  canvas ops (`screenshot`, scene placeable coordinates) — route those to a
+  canvas-enabled client.
 - **Network policy**: the Foundry URL must use localhost, `127.0.0.1`, or
   `[::1]` unless remote relaunch is explicitly enabled.
 - **Credential policy**: passwords are never accepted as tool parameters and
@@ -135,6 +140,21 @@ submitting the environment-only password, and waiting for the bridge.
 - **Params**: `timeoutMs?` (5000-120000, default 30000).
 - **Already connected**: returns immediately without launching Chrome when
   the configured GM bridge is already present.
+
+### Autonomous relaunch supervision (opt-in)
+With `FOUNDRY_RELAUNCH_AUTO=1` the server watches for the configured GM bridge
+dropping and invokes the same relaunch handler automatically — so a crashed or
+closed tab recovers with no operator action (the "away from desk" case). It
+shares the single relaunch handler with `relaunch_client`, so the supervisor and
+the tool can never double-launch a browser.
+
+- **Gate**: `FOUNDRY_RELAUNCH_AUTO=1`, plus a valid relaunch config
+  (`FOUNDRY_RELAUNCH_ENABLED=1` + URL/GM/Chrome). If the config is invalid it
+  logs why and stays idle.
+- **Tuning**: `FOUNDRY_RELAUNCH_AUTO_INTERVAL_MS` (poll interval, default 15000)
+  and `FOUNDRY_RELAUNCH_AUTO_MAX_BACKOFF_MS` (default 300000). A failed relaunch
+  backs off exponentially up to the cap so a down Foundry can't trigger a
+  Chrome-launch storm; backoff resets the moment the GM reconnects.
 
 ---
 

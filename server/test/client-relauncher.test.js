@@ -149,3 +149,45 @@ test("relaunch reports invalid configuration without launching Chrome or exposin
   assert.equal(launches, 0);
   assert.equal(JSON.stringify(result).includes("secret-value"), false);
 });
+
+test("headless relaunch passes headless:true, pre-seeds noCanvas, and strips animations", async () => {
+  const calls = [];
+  const bridges = new Map();
+  const page = {
+    goto: async () => {},
+    waitForSelector: async () => {},
+    evaluate: async () => { calls.push(["evaluate"]); },          // localStorage noCanvas pre-seed
+    $eval: async (selector, callback) => callback({
+      options: [{ textContent: "Bridge", value: "bridge-id", disabled: false }],
+    }),
+    select: async () => {},
+    type: async () => {},
+    click: async () => {},
+    waitForNavigation: async () => {},
+    addStyleTag: async arg => { calls.push(["addStyleTag", arg?.content]); },
+    url: () => "http://localhost:30000/game",
+  };
+  const browser = { newPage: async () => page, close: async () => {}, on: () => {} };
+  const config = { ...baseConfig, gmUser: "Bridge", gmPassword: "", headless: true };
+  const handler = createRelaunchHandler({
+    config,
+    bridges,
+    launchBrowser: async options => { calls.push(["launch", options.headless]); return browser; },
+    sleep: async () => {
+      bridges.set("bridge-id", {
+        userId: "bridge-id",
+        userName: "Bridge",
+        origin: "http://localhost:30000",
+        isGM: true,
+      });
+    },
+  });
+
+  const result = await handler({ timeoutMs: 5_000 });
+
+  assert.equal(result.ready, true);
+  assert.equal(calls.find(call => call[0] === "launch")[1], true);   // headless:true
+  assert.ok(calls.some(call => call[0] === "evaluate"));             // noCanvas pre-seed ran
+  const styleCall = calls.find(call => call[0] === "addStyleTag");
+  assert.ok(styleCall && /animation:none/.test(styleCall[1]));       // animations stripped
+});

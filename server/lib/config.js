@@ -42,6 +42,16 @@ export const RELAUNCH_CONFIG   = {
   allowRemote: /^(1|true|yes)$/i.test(
     process.env.FOUNDRY_RELAUNCH_ALLOW_REMOTE ?? ""
   ),
+  // Run the recovery client headless. A headless client has no GPU, so the
+  // relauncher also disables the Foundry canvas + CSS animations to avoid
+  // software-WebGL (SwiftShader) pegging the CPU. See client-relauncher.js.
+  headless: /^(1|true|yes)$/i.test(process.env.FOUNDRY_RELAUNCH_HEADLESS ?? ""),
+  // Autonomous supervision: when set, the server watches for the configured GM
+  // bridge dropping and re-launches the client automatically (with backoff).
+  // Requires FOUNDRY_RELAUNCH_ENABLED=1 and a valid relaunch config.
+  auto: /^(1|true|yes)$/i.test(process.env.FOUNDRY_RELAUNCH_AUTO ?? ""),
+  autoIntervalMs: Number.parseInt(process.env.FOUNDRY_RELAUNCH_AUTO_INTERVAL_MS ?? "", 10) || 15_000,
+  autoMaxBackoffMs: Number.parseInt(process.env.FOUNDRY_RELAUNCH_AUTO_MAX_BACKOFF_MS ?? "", 10) || 300_000,
 };
 
 // --- Security knobs (off by default; opt in via env vars) -----------------

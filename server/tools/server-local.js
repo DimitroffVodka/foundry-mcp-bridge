@@ -10,7 +10,7 @@ import { z }                                from "zod";
 import { bridges, lastSeenBridges, reconnectWaiters, routeBridge } from "../lib/bridges.js";
 import { FOUNDRY_URLS, RELAUNCH_CONFIG }    from "../lib/config.js";
 import { diagnoseBridgeStatus }             from "../lib/bridge-status.js";
-import { createRelaunchHandler }            from "../lib/client-relauncher.js";
+import { relaunchClient }                   from "../lib/relaunch.js";
 import { requestFoundry }                   from "../lib/foundry-rpc.js";
 import { registerRawTool }                  from "./_helpers.js";
 
@@ -28,12 +28,6 @@ function diagnosisReply(error, diagnosis) {
     diagnosis,
   }, null, 2) }] };
 }
-
-const relaunchClient = createRelaunchHandler({
-  config: RELAUNCH_CONFIG,
-  bridges,
-  diagnose: getBridgeDiagnosis,
-});
 
 export function registerServerLocalTools(mcp) {
   registerRawTool(mcp, "list_connected_bridges",

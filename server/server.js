@@ -22,15 +22,29 @@ import { createMcpExpressApp }            from "@modelcontextprotocol/sdk/server
 import { randomUUID }                     from "crypto";
 
 import { log }                            from "./lib/log.js";
-import { HTTP_PORT, BRIDGE_TOKEN, ALLOW_EVAL, SERVER_VERSION } from "./lib/config.js";
-import { startBridgeServer }              from "./lib/bridges.js";
+import { HTTP_PORT, BRIDGE_TOKEN, ALLOW_EVAL, SERVER_VERSION, RELAUNCH_CONFIG } from "./lib/config.js";
+import { startBridgeServer, bridges }     from "./lib/bridges.js";
 import { startHotReloadWatcher }          from "./lib/hot-reload.js";
 import { registerTools }                  from "./tools/index.js";
+import { relaunchClient }                 from "./lib/relaunch.js";
+import { createRelaunchSupervisor }       from "./lib/relaunch-supervisor.js";
 
 // Start accepting Foundry bridge connections immediately. Bridges that arrive
 // before the first MCP client are fine — the bridges Map is module-level state
 // shared with `routeBridge`.
 startBridgeServer();
+
+// Autonomous client recovery (opt-in via FOUNDRY_RELAUNCH_AUTO=1): watch for the
+// configured GM bridge dropping and relaunch the client automatically, with
+// backoff. Shares the single relaunch handler with the `relaunch_client` tool,
+// so the supervisor and the tool can never double-launch a browser.
+const relaunchSupervisor = createRelaunchSupervisor({
+  config: RELAUNCH_CONFIG,
+  bridges,
+  relaunch: relaunchClient,
+  logger: log,
+});
+relaunchSupervisor.start();
 
 // ---------------------------------------------------------------------------
 // HTTP / MCP server — stateful session management so multiple clients work
