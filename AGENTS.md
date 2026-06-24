@@ -24,7 +24,7 @@ On your first interaction in this repo, before doing anything else:
 
    **If multiple bridges are returned** (e.g. a local and a hosted Foundry world both running), pick one and thread its `targetUser` field through every subsequent tool call. Do not rely on the default GM route when more than one bridge is connected; both may be GM, and the default may not be the world the user intended.
 3. **If the tool isn't in your tool list at all** → your MCP client isn't connected to the server. Re-read the setup sections below and tell the user which step is missing. Do **not** web-search for tool names; the tool list is exposed by the server itself.
-4. **If the tool errors or returns an empty array** → the HTTP server is reachable but no Foundry world has the `foundry-mcp-live` module active. Tell the user to open Foundry and verify the module is enabled. Do **not** retry blindly or guess.
+4. **If the tool errors or returns an empty array** → the HTTP server is reachable but no Foundry world has the `foundry-mcp-live` module active (or the client opted out of auto-connect — see below). Tell the user to open Foundry and verify the module is enabled. Do **not** retry blindly or guess.
 
 The tool list is authoritative. There are no hidden tools, no resources, no prompts. Don't guess names you can't see; don't search the web for documentation you already have access to via `tools/list`.
 
@@ -32,14 +32,29 @@ The tool list is authoritative. There are no hidden tools, no resources, no prom
 
 Common failure mode for fresh agents: looking for MCP **resources** (`resources/list`, `resources/read`) and finding nothing, then concluding the server is empty.
 
-The server registers **zero resources and zero prompts**. Everything is exposed as MCP **tools**. Call tools by name. The full list lives in `server/TOOLS.md`; a few staples:
+The server registers **zero resources and zero prompts**. Everything is exposed as MCP **tools**. Call tools by name. `tools/list` is the live source of truth; `server/TOOLS.md` is the detailed reference. A few staples to orient with:
 
-- `list_actors`, `get_actor`, `snapshot_actor`
+- `list_actors`, `get_actor`, `get_actor_items`, `snapshot_actors`
 - `list_compendiums`, `search_compendium`, `get_compendium_document`
-- `get_scene`, `capture_scene`, `screenshot`
-- `roll`, `use_item`, `target`, `move_token`
-- `get_console_errors`, `reload_foundry`
+- `get_scene`, `get_scene_placeables`, `screenshot`
+- `roll`, `use_item`, `target`, `move_token`, `apply_damage`
+- `get_console_errors`, `bridge_status`, `reload_foundry`
 - `list_connected_bridges` — use this first to confirm Foundry is connected
+
+## How the tools are organized
+
+The server currently exposes ~67 tools. **Do not assume one tool per verb** — many related operations are merged behind a single tool that takes an `action` discriminator. Read the tool's own schema; the `action` enum lists the valid modes for that tool.
+
+- **Actors:** `actor_write` (create/update/delete actors and create-from-compendium), `actor_items` (add/update/remove items on an actor), `actor_ownership` (get/set ownership).
+- **World content:** `folder`, `journal`, `combat`, `scene`, `scene_level`, `region` — each is one tool with an `action` param, not separate `create_*`/`update_*`/`delete_*` verbs.
+- **Tokens:** `create_token`, `update_token`, `delete_tokens`, `toggle_token_condition`. `move_token` does both a direct move and a wall-aware A\* path — set `pathed: true` for the pathed move. (There is no separate `move_token_pathed`.)
+- **Player-facing requests:** `request_roll`, `request_check`, `request_item_use` — these route a prompt to a user's screen and wait for a human click (see Mutation caution).
+
+If a name you remember isn't in `tools/list`, it was probably folded into one of the above during the 96→67 consolidation — check the merged tool's `action` enum rather than guessing the old name.
+
+## Choosing a tool — don't default to `evaluate`
+
+`evaluate` runs arbitrary JavaScript in the Foundry client and is **only present when `FOUNDRY_MCP_ALLOW_EVAL=1`**. When a dedicated tool covers what you need, prefer it: the dedicated tools encode system correctness that hand-rolled `evaluate` gets subtly wrong — `apply_damage` clamps HP at the system level, `move_token` routes around walls, `use_item` runs the system's attack/crit logic — and the write tools carry audit/undo. Use `evaluate` only when no tool covers the need, and check `tools/list` first. (If you find yourself reaching for `evaluate` for something a tool should handle, that's worth telling the user — it usually means a tool description needs sharpening.)
 
 ## Transport
 
@@ -70,7 +85,8 @@ Restart Codex after editing. The server should appear in the MCP list with tools
 
 1. MCP server is running: `cd server && npm start` (or `server\start.bat` on Windows). Default port 3000.
 2. Foundry VTT is open with the `foundry-mcp-live` module active. The module connects to the server's WebSocket bridge on port 3001.
-3. `list_connected_bridges` returns at least one bridge — confirms Foundry-side handshake worked.
+3. The connecting Foundry client has **"Auto-connect to MCP server"** enabled (module setting, default on) — or is the dedicated headless bridge client, which always connects. A play client with auto-connect off can connect on demand from the console with `mcpBridge.reconnect()`.
+4. `list_connected_bridges` returns at least one bridge — confirms the Foundry-side handshake worked.
 
 ## If `BRIDGE_TOKEN` is set
 
@@ -82,27 +98,19 @@ If multiple Foundry users with the same name are connected (e.g. two GMs on diff
 
 ## Mutation caution
 
-Some tools mutate live Foundry state — they will change what GMs and players see in the open world. Before calling any of these, identify the target token/actor explicitly and pass `targetUser` if multiple bridges are connected. Read-only tools should come first to confirm you have the right target.
+Some tools change live Foundry state — they alter what GMs and players see in the open world. Before calling any of these, identify the target token/actor explicitly (read first) and pass `targetUser` if multiple bridges are connected.
 
-**Mutating tools include** (not exhaustive — check the tool description): `move_token`, `move_token_pathed`, `update_token`, `delete_tokens`, `toggle_token_condition`, `use_item`, `roll`, `reload_foundry`, `target`, `click`, `simulate_dialog_response`, and `evaluate` if enabled.
+There are **three independent gates** on mutation, all of which must allow the call:
 
-**World-authoring tools** (only present when `FOUNDRY_MCP_ALLOW_WRITE=1` on the server):
+1. **Server env gate.** World-authoring tools (`actor_write`, `actor_items`, `actor_ownership`, `create_token`, `folder`, `journal`, `combat`, `scene`, `region`, `send_chat_message`, the `request_*` tools, `apply_damage`, …) are registered only when `FOUNDRY_MCP_ALLOW_WRITE=1`. If they're not in your tool list, the gate is off **by design** — tell the user to set the env var rather than retrying. `evaluate` / `job_result` likewise require `FOUNDRY_MCP_ALLOW_EVAL=1`.
+2. **Per-world read-only toggle.** The GM can flip a module setting, **"Allow AI to modify the world"** (default on), to make the bridge read-only without restarting the server. When it's off, every mutating tool refuses at the server's audit chokepoint even though the tool is still listed. If a mutation is rejected for this reason, tell the user to re-enable the setting — don't retry.
+3. **No undo on deletes.** Foundry has no undo for delete actions (`folder`/`journal`/`actor_write` with `action: "delete"`, `delete_tokens`, …). Confirm the target with a read first; there is no recovery.
 
-- Creates: `create_folder`, `create_actor`, `create_actor_from_compendium`, `add_items_to_actor`, `create_journal_entry`, `add_page_to_journal_entry`, `create_token`
-- Updates: `update_actor`, `update_item_on_actor`, `update_journal_page`, `set_actor_ownership`
-- Reads (counterpart to a write): `get_actor_ownership`
-- Combat (write): `start_combat`, `end_combat`, `advance_combat`
-- Chat / interaction (write): `send_chat_message`, `request_roll`, `request_roll_typed`
-- Combat / Native rolls (write): `request_attack_roll`, `request_damage_roll`, `request_item_use`, `apply_damage`
-- Deletes (permanent — Foundry has no undo for these): `delete_folder`, `delete_actor`, `delete_items_from_actor`, `delete_journal_entry`, `delete_journal_page`
+Player-facing request tools (`request_roll`, `request_check`, `request_item_use`) pop a dialog on the **target user's** screen and wait for a human to click. If you target a player without an active browser, the dialog never shows and the call times out — target a user you know is connected, or check the tool schema for an auto-accept option for unattended/test runs.
 
-The reads `get_combat` and `get_chat_messages` are NOT gated — they're available regardless of `FOUNDRY_MCP_ALLOW_WRITE`.
+The reads `get_combat` and `get_chat_messages` are **not** gated — available regardless of `FOUNDRY_MCP_ALLOW_WRITE`.
 
-For `request_roll`: it pops a Foundry dialog on the target user's screen. If you target a player without an active browser, the dialog never shows and the call times out. Use `autoAccept: true` for tests or when you specifically want the GM to roll without confirming.
-
-If they're not in your tool list, the server's write gate is off and that's intentional; tell the user to set the env var rather than retrying. Before any delete, prefer reading the document with `get_actor` / `list_journals` / etc. first so you can confirm you're nuking the right thing — there is no recovery.
-
-**Read-only safe to explore with:** `list_*`, `get_*`, `snapshot_*`, `diff_*`, `search_compendium`, `screenshot`, `capture_scene`, `get_console_errors`, `trace_*`.
+**Read-only, safe to explore with:** `list_*`, `get_*`, `search_compendium`, `snapshot_actors`, `diff_with`, `screenshot`, `get_console_errors`, `bridge_status`, `trace_*`.
 
 ## Quick smoke test
 
@@ -114,21 +122,3 @@ After configuration, in order. If multiple bridges are connected, pick one `targ
 4. `get_scene` (with same `targetUser`) — sanity check on read-only state queries against the active scene.
 
 If those four work, the integration is healthy.
-
-
-<claude-mem-context>
-# Memory Context
-
-# claude-mem status
-
-This project has no memory yet. The current session will seed it; subsequent sessions will receive auto-injected context for relevant past work.
-
-Memory injection starts on your second session in a project.
-
-`/learn-codebase` is available if the user wants to front-load the entire repo into memory in a single pass (~5 minutes on a typical repo, optional). Otherwise memory builds passively as work happens.
-
-Live activity: http://localhost:37777
-How it works: `/how-it-works`
-
-This message disappears once the first observation lands.
-</claude-mem-context>

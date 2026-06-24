@@ -199,6 +199,12 @@ Every Active Effect on an actor — buffs, debuffs, persistent item effects, sta
   - `duration` — `{seconds, rounds, turns, startRound, startTurn, combat}` — combat-aware duration.
   - `disabled` — if true the effect exists but isn't applying.
 
+### `get_actor_items`
+Focused list of an actor's embedded items, optionally filtered by type. Much smaller payload than `get_actor` when you only need to pick one item.
+
+- **Params**: `actorId` (id or exact name), `type?` (e.g. `"weapon"`, `"spell"`, `"class"`).
+- **Returns**: `[{ id, name, type, img, system }]`.
+
 ---
 
 ## Modules
@@ -270,6 +276,27 @@ Summary of the active scene. Your go-to "what's happening right now" call.
   - `grid: { size, type }` — `size` is pixels per grid square; `type` is `0` (gridless), `1` (square), `2–5` (hex variants).
   - `tokens: [{ id, name, actorId, x, y, elevation, hidden }]` — every token on the scene. `(x, y)` is the top-left of the token in pixels. Divide by `grid.size` to get grid coords.
 
+### `get_scene_placeables`
+Lists placeables of a given type on a scene — the embedded collections `get_scene` doesn't return (templates, regions, walls, lights, sounds, drawings, notes, tiles). Returns full `toObject()` data per item, so you can inspect them without falling back to `evaluate`.
+
+- **Params**:
+  - `type?` — one of `Token`, `MeasuredTemplate`, `Region`, `Wall`, `AmbientLight`, `AmbientSound`, `Drawing`, `Note`, `Tile` (default `Token`).
+  - `sceneId?` — default: active scene.
+  - `select?` — array of dotted field paths to keep (e.g. `['_id','name','behaviors.type']`); drastically cuts payload size. Array paths map across elements (`behaviors.type` returns each behavior's type).
+- **Returns**: `[document.toObject()]`, or the projected subset when `select` is given.
+
+### `get_scene_levels`
+The levels collection of a multi-level scene (Foundry v14-native; empty array on v12/v13 or single-level scenes).
+
+- **Params**: `sceneId?` (default: active scene).
+- **Returns**: `[{ id, name, elevation: { bottom, top } }]`, plus the currently-active `levelId` when the scene is the viewed one.
+
+### `set_canvas_level`
+Switch which floor of a multi-level scene the canvas is viewing — affects anything reading `canvas.level` (level-aware visibility, wall-height, the shadowdark-extras dungeon painter, etc.). Activates the target scene first if it isn't active.
+
+- **Params**: `sceneId?`; and either `levelId?` (preferred, unambiguous) **or** `elevation?` (picks the level whose `[bottom, top]` range contains it).
+- **Returns**: confirmation of the now-active level.
+
 ---
 
 ## Data model
@@ -279,6 +306,21 @@ System-defined schema for a document type. Use this to know what `system.*` fiel
 
 - **Params**: `type?` (`"Actor"` or `"Item"`, default `"Actor"`), `subtype?` (e.g. `"character"`, `"monster"`).
 - **Returns**: the system template object, or `{ _sampleFrom: name, system: {...} }` if no template is registered (falls back to showing a real sample actor's system data).
+
+### `get_settings`
+Read Foundry settings in three modes.
+
+- **Params**: `moduleId?`, `key?`.
+- **Modes**:
+  - no args → catalog of every registered `(namespace, key)` pair, without values.
+  - `moduleId` only → all settings for that namespace, with current values.
+  - `moduleId` + `key` → just that one setting's value.
+
+### `list_region_behavior_types`
+Enumerate every registered RegionBehavior subtype and its schema fields — discover what `changeLevel`, `executeScript`, `damageToken`, `defineSurface`, etc. accept without reading the Foundry/system source.
+
+- **Params**: none.
+- **Returns**: `{ types: { <type>: { <field>: <DataField type>, ... } } }`.
 
 ---
 
@@ -312,6 +354,12 @@ Rolling buffer of `console.error`/`console.warn` captured by the bridge. The bri
 
 - **Params**: `count?`, `sinceMs?` (default 60000), `level?`.
 - **Returns**: `{ bufferSize, bufferCapacity, returned, entries }`.
+
+### `get_debug_snapshot`
+One-call situational awareness aggregator: game/world/system info, active scene, selected token, current targets, combat state, recent console errors, recent chat, and the active module list. The default "what's going on?" tool — replaces 8+ individual reads with a single round trip.
+
+- **Params**: none.
+- **Returns**: an aggregate object carrying the fields listed above.
 
 ### `trace_hooks`
 Register listeners on **multiple** Foundry hooks at once and return a single time-ordered timeline of every firing. Use this to figure out what args hooks receive (and in what order) before writing code against them. (The old singular `trace_hook` was removed — pass a one-element `hooks` array for the same effect.)
@@ -389,6 +437,32 @@ Poll a background evaluation or read a large JSON result in bounded chunks.
   least-recently-used when space is required.
 - **Cancellation**: running jobs cannot be deleted or canceled; deletion is
   allowed after settlement.
+
+### `snapshot_actors`
+Capture structured projections of one or more actors at specific paths — focused and fast. Selectors walk the **live** document, so derived/getter-only data surfaces (Active-Effect-modified stats, `prepareDerivedData` patches, computed Sets like `actor.statuses`) that `actor.toObject()` misses. Pair it with `diff_with` as the "before".
+
+- **Params**:
+  - `actors` (required) — id(s)/name(s); single string or array.
+  - `select?` — selector paths (dot paths + array wildcards): `system.health.value`, `effects[*].name`, `items[2].name`, `flags.vagabond`, `statuses`. Omit to capture the full `toObject()` under a `_full` key (persisted source — no derived data).
+  - `storeId?` — persist the snapshot server-side (~30 min TTL, LRU 50) for a later `diff_with({ storeId })`.
+- **Returns**: `{ snapshotId, takenAt, actors, errors? }`.
+
+### `diff_with`
+Diff a previously-stored snapshot (`storeId`) or an inline snapshot against the **current** state of the same actors+selectors — re-snapshots the live game and computes per-path changes.
+
+- **Params**:
+  - `storeId?` — id from a prior `snapshot_actors` (reuses its `select`/`targetUser`). Mutually exclusive with `snapshot`.
+  - `snapshot?` — inline `actors` payload from a prior `snapshot_actors`; requires matching `actors` and `select`.
+- **Returns**: `{ changes: [{ actorId, path, op, before, after }], summary }`.
+
+### `call_module_api`
+Call a function exposed on `game.modules.get(moduleId).api` — an allowlist-style, safer alternative to `evaluate`: only functions a module deliberately puts on its `.api` surface are reachable. Lets agents drive third-party integrations (shadowdark-extras dungeon generation, mythic-gme-tools, etc.) without opening the arbitrary-code surface of `evaluate`.
+
+- **Params**:
+  - `moduleId` (required) — e.g. `"shadowdark-extras"`.
+  - `fn?` — function name on `module.api`. **Omit to discover** the available functions without calling anything.
+  - `args?` — positional args (default `[]`).
+- **Returns**: the JSON-serialised result (or the function list when `fn` is omitted).
 
 ---
 
@@ -470,6 +544,12 @@ Simulates a user click on a DOM element. Uses `HTMLElement.click()` (the native 
   - `waitMs?` — how long to wait after click for async chat messages (default 400).
 - **Returns**: `{ selector, element: { tag, class, id, dataset, text }, messagesCreated, messages: [...] }` or `{ error, stack, element }`.
 - **Why this exists**: Vagabond (and many systems) only dispatch the *real* attack → defender → damage → hit/crit pipeline via their sheet button handlers. Calling `item.rollAttack()` headlessly misses half of it. `click` gives you the real production path.
+
+### `simulate_dialog_response`
+Click a button on the topmost open DialogV2 — use after a tool action that opens a confirmation/options dialog (cast options, talent config, the dialog-helpers `confirmDialog`/`waitDialog` wrappers). Matches by button text or position.
+
+- **Params**: `label?` (button text contains, case-insensitive) **or** `index?` (zero-based position in the button row).
+- **Returns**: the dialog title and the clicked button's resolved label.
 
 ---
 

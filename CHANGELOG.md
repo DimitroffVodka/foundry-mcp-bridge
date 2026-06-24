@@ -2,6 +2,61 @@
 
 All notable changes to Foundry MCP Live are documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- **Tool-usage telemetry.** Every MCP tool call is recorded — to an in-memory
+  aggregate served at `GET /api/usage` and to a per-call JSONL log
+  (`server/usage-telemetry.jsonl`). A single wrapper at the tool-registration
+  chokepoint covers every tool; it captures tool name, ok/error, duration,
+  `targetUser`, arg keys, and (for `evaluate`) the truncated body. On by
+  default — `FOUNDRY_MCP_USAGE=0` disables it, `FOUNDRY_MCP_USAGE_LOG`
+  redirects the log. Local-only: the `/api/usage` aggregate carries no args or
+  eval bodies and honors `BRIDGE_TOKEN`.
+- **`npm run report` usage report** (`server/scripts/usage-report.mjs`) — reads
+  the JSONL and buckets tools into used / never-used / evaluate-share, flags
+  never-used tools as merge/cut candidates vs. irreplaceable (Tier-4) vs.
+  opt-in infra, and dumps the `evaluate` bodies so calls a dedicated tool
+  should have handled are easy to spot. Has a low-sample guard.
+- **MCP server `instructions`.** The server now returns orientation guidance in
+  the `initialize` handshake, which clients inject into the model's context:
+  what the server is, prefer dedicated tools over `evaluate`, the
+  action-discriminator tool model, and routing/gates. This is the only guidance
+  channel a pure MCP client sees — it never reads AGENTS.md/TOOLS.md.
+- **"Auto-connect to MCP server" client setting** (default on). Gates whether an
+  interactive client opens the bridge socket on world load; the dedicated
+  headless (no-canvas) client always connects regardless. The decision is a
+  pure `shouldAutoConnect()` helper.
+
+### Changed
+
+- `evaluate`'s tool description now leads with a "last-resort — prefer a
+  dedicated tool" redirect, so the steering reaches clients that don't surface
+  server instructions.
+- **AGENTS.md** rewritten for the consolidated 67-tool set: pre-consolidation
+  tool names replaced with the action-discriminator model and a tool-selection
+  policy, the read-only and auto-connect behaviors documented, and a stale
+  auto-injected memory block removed.
+- **server/TOOLS.md** now documents 11 previously-missing tools
+  (`get_actor_items`, `get_scene_placeables`, `get_scene_levels`,
+  `set_canvas_level`, `get_settings`, `list_region_behavior_types`,
+  `get_debug_snapshot`, `snapshot_actors`, `diff_with`, `call_module_api`,
+  `simulate_dialog_response`).
+
+### Fixed
+
+- Token moves over the bridge on Foundry v13+ no longer revert: the move tools
+  pass `{ animate: false }` instead of the v12-era `{ animation: { duration: 0 } }`,
+  which v13 ignored — animated bridge-driven moves snapped back to origin.
+
+### Internal
+
+- Doc-currency test guards: `docs-tool-names` (AGENTS.md names only registered
+  tools) and `docs-tool-coverage` (TOOLS.md documents every tool, no orphans),
+  plus unit tests for the telemetry tracker, server instructions, and the
+  auto-connect decision.
+
 ## [0.17.1] - 2026-06-19
 
 ### Fixed
