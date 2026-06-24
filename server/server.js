@@ -28,6 +28,8 @@ import { startHotReloadWatcher }          from "./lib/hot-reload.js";
 import { registerTools }                  from "./tools/index.js";
 import { relaunchClient }                 from "./lib/relaunch.js";
 import { createRelaunchSupervisor }       from "./lib/relaunch-supervisor.js";
+import { getUsageSnapshot, getUsageLogPath, isUsageTelemetryEnabled } from "./lib/usage-telemetry.js";
+import { SERVER_INSTRUCTIONS }          from "./lib/server-instructions.js";
 
 // Start accepting Foundry bridge connections immediately. Bridges that arrive
 // before the first MCP client are fine — the bridges Map is module-level state
@@ -108,6 +110,25 @@ if (!ALLOW_EVAL) {
   log("`evaluate` tool DISABLED (set FOUNDRY_MCP_ALLOW_EVAL=1 to enable).");
 }
 
+log(isUsageTelemetryEnabled()
+  ? `Tool-usage telemetry ON → ${getUsageLogPath()} (read GET /api/usage; set FOUNDRY_MCP_USAGE=0 to disable)`
+  : "Tool-usage telemetry OFF (set FOUNDRY_MCP_USAGE=1 to enable).");
+
+// Usage snapshot: live in-memory aggregate of which tools have been called.
+// Aggregate-only (no args / eval bodies — those stay in the JSONL log on disk).
+// Gated behind the same bearer token as /mcp when one is configured.
+app.get("/api/usage", (req, res) => {
+  if (BRIDGE_TOKEN) {
+    const auth = req.headers.authorization ?? "";
+    const m = /^Bearer\s+(.+)$/i.exec(auth);
+    if (!m || m[1] !== BRIDGE_TOKEN) {
+      res.status(401).json({ error: "Invalid or missing bearer token" });
+      return;
+    }
+  }
+  res.json(getUsageSnapshot());
+});
+
 // Handle all MCP traffic (POST for messages, GET for SSE streams, DELETE to close)
 app.all("/mcp", async (req, res) => {
   const sessionId = req.headers["mcp-session-id"];
@@ -141,7 +162,10 @@ app.all("/mcp", async (req, res) => {
     }
   };
 
-  const mcp = new McpServer({ name: "foundry-vtt", version: SERVER_VERSION });
+  const mcp = new McpServer(
+    { name: "foundry-vtt", version: SERVER_VERSION },
+    { instructions: SERVER_INSTRUCTIONS },
+  );
   await registerTools(mcp);
   await mcp.connect(transport);
   await transport.handleRequest(req, res, req.body);

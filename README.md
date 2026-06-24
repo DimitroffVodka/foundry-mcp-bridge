@@ -319,6 +319,8 @@ You should get a 200 with an `mcp-session-id` header.
 | `FOUNDRY_URLS` | empty | Comma-separated Foundry origins for restart-safe `bridge_status` probes, e.g. `http://localhost:30000`. |
 | `FOUNDRY_MCP_ALLOW_WRITE` | `0` | Set to `1` to enable world-authoring tools (`create_folder`, `create_actor`, `create_journal_entry`, etc.) that mutate persistent world data. See [SECURITY.md](SECURITY.md). |
 | `FOUNDRY_MCP_ALLOW_SELF_TEST` | `0` | Set to `1` alongside `FOUNDRY_MCP_ALLOW_WRITE=1` to register the guarded `self_test` tool. |
+| `FOUNDRY_MCP_USAGE` | `1` | Tool-usage telemetry — records each tool call to an in-memory aggregate (`GET /api/usage`) and a JSONL log. Set to `0`/`false`/`no`/`off` to disable. |
+| `FOUNDRY_MCP_USAGE_LOG` | `server/usage-telemetry.jsonl` | Path for the per-call JSONL usage log. The log may contain truncated arg previews and `evaluate` bodies, so keep it local. |
 | `FOUNDRY_RELAUNCH_ENABLED` | `0` | Register `relaunch_client`. Requires the URL, GM user, and Chrome path variables below. |
 | `FOUNDRY_RELAUNCH_URL` | empty | Explicit Foundry origin to rejoin, e.g. `http://localhost:30000`. Loopback-only unless remote use is explicitly allowed. |
 | `FOUNDRY_RELAUNCH_GM_USER` | empty | Exact Foundry GM user name selected on the join page. |
@@ -338,6 +340,7 @@ You should get a 200 with an `mcp-session-id` header.
 - `relaunch_client` is local and opt-in. Keep its Chrome profile dedicated to Foundry automation and store any GM password only in the server environment.
 - Both ports bind to `127.0.0.1` only — not exposed to the network.
 - No API tokens are consumed by the AI clients. All communication is local: AI client ↔ MCP server ↔ Foundry browser.
+- Tool-usage telemetry is on by default and fully local. `GET /api/usage` returns the live per-tool aggregate (counts, error rate, avg duration, first/last used); the JSONL log records one rich line per call for offline analysis. Both are gated by the same `BRIDGE_TOKEN` as `/mcp` when one is set. Disable with `FOUNDRY_MCP_USAGE=0`.
 - See [SECURITY.md](SECURITY.md) for the threat model and opt-in auth.
 
 ## Releasing a new version

@@ -6,7 +6,8 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "test": "node --test test/*.test.js"
+    "test": "node --test test/*.test.js",
+    "report": "node scripts/usage-report.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",

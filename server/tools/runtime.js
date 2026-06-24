@@ -42,7 +42,13 @@ export function registerRuntimeTools(mcp) {
   // --- Evaluate (opt-in: requires FOUNDRY_MCP_ALLOW_EVAL=1) ---
   if (ALLOW_EVAL) {
     registerRawTool(mcp, "evaluate",
-      "Evaluate arbitrary JavaScript in the live Foundry VTT context. "
+      "LAST-RESORT power tool — prefer a dedicated tool when one exists. The "
+      + "dedicated tools (e.g. `apply_damage`, `move_token`, `use_item`, "
+      + "`create_token`, `actor_write`, `combat`) encode system correctness "
+      + "(HP clamping, wall-aware movement, attack/crit logic) and carry "
+      + "audit/undo that hand-written JS skips — reaching for `evaluate` first "
+      + "tends to produce wrong state. Use this only when no dedicated tool fits.\n\n"
+      + "Evaluate arbitrary JavaScript in the live Foundry VTT context. "
       + "Has access to `game`, `canvas`, and `ui` globals. "
       + "Write the body of an async function; `return` to send data back; "
       + "`await` works.\n\n"

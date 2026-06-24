@@ -71,3 +71,17 @@ export const ALLOW_EVAL       = /^(1|true|yes)$/i.test(process.env.FOUNDRY_MCP_A
 // into mutating the world via an LLM hallucination.
 export const ALLOW_WRITE      = /^(1|true|yes)$/i.test(process.env.FOUNDRY_MCP_ALLOW_WRITE ?? "");
 export const ALLOW_SELF_TEST  = /^(1|true|yes)$/i.test(process.env.FOUNDRY_MCP_ALLOW_SELF_TEST ?? "");
+
+// --- Tool-usage telemetry --------------------------------------------------
+// Records every MCP tool invocation (name, ok/error, duration, args digest)
+// into an in-memory aggregate (served at GET /api/usage) and a JSONL append
+// log on disk — answering which tools actually earn their keep. ON by default;
+// set FOUNDRY_MCP_USAGE=0 (or false/no/off) to disable, or
+// FOUNDRY_MCP_USAGE_LOG=<path> to redirect the JSONL file. The log can hold
+// truncated `evaluate` bodies and arg previews, so keep it local.
+export const USAGE_TELEMETRY = {
+  enabled: !/^(0|false|no|off)$/i.test(process.env.FOUNDRY_MCP_USAGE ?? ""),
+  logPath: process.env.FOUNDRY_MCP_USAGE_LOG ?? "",  // "" → telemetry module's default path
+  maxArgsChars: 1000,
+  maxEvalBodyChars: 2000,
+};

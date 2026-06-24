@@ -9,3 +9,7 @@ dist/
 # Local launcher shortcuts and scratch/debug debris
 *.lnk
 scratch/
+
+# Tool-usage telemetry log (local analysis data; may contain arg/eval previews)
+usage-telemetry.jsonl
+*.jsonl

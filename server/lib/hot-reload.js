@@ -36,6 +36,7 @@ import { watch } from "fs";
 import path      from "path";
 import { fileURLToPath } from "url";
 import { log }   from "./log.js";
+import { wrapToolHandler } from "./usage-telemetry.js";
 
 // Per-session registry. Keyed by the McpServer instance so multiple sessions
 // don't fight over names. Each entry: { name → registeredTool }.
@@ -64,14 +65,18 @@ function registryFor(mcp) {
  * shape compatible with the SDK).
  */
 export function upsertTool(mcp, name, description, paramsSchema, callback) {
+  // Instrument the handler for usage telemetry. Wraps the *raw* callback fresh
+  // on every (re-)registration, so hot-reload swaps never double-wrap. No-op
+  // (returns the original callback) when telemetry is disabled.
+  const instrumented = wrapToolHandler(name, callback);
   const reg = registryFor(mcp);
   const existing = reg.get(name);
   if (existing) {
     // Update fires sendToolListChanged() internally per SDK.
-    existing.update({ description, paramsSchema, callback });
+    existing.update({ description, paramsSchema, callback: instrumented });
     return existing;
   }
-  const registered = mcp.tool(name, description, paramsSchema, callback);
+  const registered = mcp.tool(name, description, paramsSchema, instrumented);
   reg.set(name, registered);
   return registered;
 }
