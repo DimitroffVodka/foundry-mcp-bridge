@@ -21,6 +21,7 @@ import {
   splitSceneCompatibilityFields
 } from "./scene-compat.js";
 import { runFoundrySelfTest } from "./self-test.js";
+import { shouldAutoConnect } from "./auto-connect.js";
 
 const MODULE_ID = "foundry-mcp-live";
 
@@ -1967,8 +1968,10 @@ const handlers = {
       if (typeof params.x !== "number" || typeof params.y !== "number") {
         return { error: "x and y are required numbers" };
       }
-      const animation = params.animate === false ? { duration: 0 } : undefined;
-      await t.update({ x: params.x, y: params.y }, animation ? { animation } : {});
+      // Foundry v13+: token position updates persist only with { animate: false }.
+      // The v12-era { animation: { duration: 0 } } no longer disables animation, and an
+      // animated move driven over the bridge reverts (the document snaps back to origin).
+      await t.update({ x: params.x, y: params.y }, { animate: false });
       return { id: t.id, name: t.name, x: t.x, y: t.y };
     });
   },
@@ -2000,8 +2003,8 @@ const handlers = {
 
       // Fallback — no collision backend / grid: plain teleport
       if (!backend || !gridSize) {
-        const opts = animate ? {} : { animation: { duration: 0 } };
-        await t.update({ x: params.x, y: params.y, ...finalExtras }, opts);
+        // v13+: must pass { animate: false } or the bridge-driven move reverts.
+        await t.update({ x: params.x, y: params.y, ...finalExtras }, { animate: false });
         return { id: t.id, name: t.name, x: t.x, y: t.y, pathCost: null, doorsOpened: [] };
       }
 
@@ -2067,12 +2070,11 @@ const handlers = {
           }
         }
 
-        const isLast         = i === path.length - 1;
-        const upd            = { x: wp.x, y: wp.y, ...(isLast ? finalExtras : {}) };
-        const shouldAnimate  = isLast && animate;
-        const opts           = {};
-        if (!shouldAnimate) opts.animation = { duration: 0 };
-        if (doorsHere)      opts.teleport  = true;
+        const isLast = i === path.length - 1;
+        const upd    = { x: wp.x, y: wp.y, ...(isLast ? finalExtras : {}) };
+        // v13+: animated hops revert over the bridge; force instant so the move persists.
+        const opts   = { animate: false };
+        if (doorsHere) opts.teleport = true;
 
         await current.update(upd, opts);
         const refreshed = scene.tokens.get(current.id);
@@ -4442,14 +4444,44 @@ Hooks.once("init", () => {
     type: Boolean,
     default: true,
   });
+
+  // Per-client toggle for auto-connecting to the MCP server on world load.
+  // Default ON so the bridge connects (and the MCP tools become available) as
+  // soon as a world loads — the long-standing behavior. Turn it OFF on a client
+  // used only for interactive play if you don't want the bridge socket and its
+  // 5s reconnect loop running; connect on demand from the console with
+  // mcpBridge.reconnect(). The dedicated headless (no-canvas) bridge client
+  // always auto-connects regardless of this setting.
+  game.settings.register(MODULE_ID, "autoConnect", {
+    name: "Auto-connect to MCP server",
+    hint: "When on (default), THIS browser connects to the MCP/Claude bridge "
+        + "automatically once the world loads. Turn it off on a play-only client "
+        + "to avoid the bridge socket + reconnect loop, then connect on demand "
+        + "from the console with mcpBridge.reconnect(). The headless no-canvas "
+        + "bridge client always auto-connects regardless of this setting.",
+    scope: "client",
+    config: true,
+    type: Boolean,
+    default: true,
+  });
 });
 
 // ---------------------------------------------------------------------------
 // Foundry hook — connect once the game is ready
 // ---------------------------------------------------------------------------
 Hooks.once("ready", () => {
-  console.log(`${MODULE_ID} | Game ready — connecting to MCP server...`);
-  connect();
+  // Auto-connect unless this client explicitly opted out. The dedicated headless
+  // bridge (no-canvas mode) always connects regardless of the setting, so the
+  // MCP tools stay available even if a GM turned auto-connect off for their own
+  // play client.
+  const headless = !!game.settings.get("core", "noCanvas");
+  const optedIn  = game.settings.get(MODULE_ID, "autoConnect");
+  if (shouldAutoConnect({ optedIn, headless })) {
+    console.log(`${MODULE_ID} | Game ready — connecting to MCP server...`);
+    connect();
+  } else {
+    console.log(`${MODULE_ID} | Auto-connect disabled on this client — enable "Auto-connect to MCP server" in Module Settings or run mcpBridge.reconnect() to connect on demand.`);
+  }
 });
 
 // Expose for debugging from Foundry console
