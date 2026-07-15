@@ -26,6 +26,7 @@ export const WS_HOST          = process.env.FOUNDRY_WS_HOST ?? "127.0.0.1";
 export const HTTP_PORT        = parseInt(process.env.FOUNDRY_MCP_PORT ?? "3000", 10);
 export const REQUEST_TIMEOUT  = 15_000;
 export const HELLO_DEADLINE_MS = 3000;
+export const HEARTBEAT_INTERVAL_MS = 30_000;      // ping/pong interval to reap half-open bridge sockets
 export const SNAPSHOT_TTL_MS   = 30 * 60 * 1000;  // 30 min
 export const SNAPSHOT_MAX_LRU  = 50;
 export const FOUNDRY_URLS      = (process.env.FOUNDRY_URLS ?? "")

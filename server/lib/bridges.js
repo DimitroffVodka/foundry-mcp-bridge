@@ -17,7 +17,7 @@
  * installs keep working until they're upgraded.
  */
 import { WebSocketServer } from "ws";
-import { WS_PORT, WS_HOST, HELLO_DEADLINE_MS, BRIDGE_TOKEN, SERVER_VERSION, PROTOCOL_VERSION } from "./config.js";
+import { WS_PORT, WS_HOST, HELLO_DEADLINE_MS, HEARTBEAT_INTERVAL_MS, BRIDGE_TOKEN, SERVER_VERSION, PROTOCOL_VERSION } from "./config.js";
 import { log }                        from "./log.js";
 import { pendingRequests }            from "./foundry-rpc.js";
 
@@ -102,6 +102,13 @@ export function startBridgeServer() {
 
   wss.on("connection", (socket) => {
     log("Foundry bridge socket opened (awaiting hello)");
+
+    // Heartbeat liveness (see the interval below). A fresh socket starts
+    // alive; every pong from the peer re-arms it. If a socket goes half-open
+    // (peer's TCP is dead but never sent a FIN, so no `close` fires), it stops
+    // ponging and the interval terminates it on the next sweep.
+    socket.isAlive = true;
+    socket.on("pong", () => { socket.isAlive = true; });
 
     // Schedule a deadline for the `hello` frame. If it doesn't arrive, the
     // bridge is from a pre-multi-user version — register as legacy GM so it
@@ -243,6 +250,31 @@ export function startBridgeServer() {
       }
     });
   });
+
+  // Ping/pong heartbeat — reap half-open sockets that never fired `close`.
+  //
+  // A bridge is otherwise removed ONLY on the socket's `close` event. If the
+  // peer goes half-open (its TCP dies without a FIN — laptop sleep, NAT idle
+  // timeout, network drop), `close` never fires and the dead bridge lingers in
+  // `bridges` indefinitely, invisible-yet-registered. `socket.terminate()`
+  // synthesizes the `close` handler above, which removes the bridge and lets
+  // the module's client-side reconnect kick in.
+  const heartbeat = setInterval(() => {
+    for (const socket of wss.clients) {
+      if (socket.isAlive === false) {
+        log("Bridge failed heartbeat (no pong) — terminating half-open socket");
+        socket.terminate();          // fires `close` → bridge removed, client reconnects
+        continue;
+      }
+      socket.isAlive = false;        // cleared here, re-armed by the "pong" handler
+      try { socket.ping(); } catch { /* socket may be mid-teardown; ignore */ }
+    }
+  }, HEARTBEAT_INTERVAL_MS);
+
+  // Don't let the heartbeat timer keep the process alive on its own.
+  heartbeat.unref?.();
+
+  wss.on("close", () => clearInterval(heartbeat));
 
   return wss;
 }
