@@ -4,6 +4,8 @@ All notable changes to Foundry MCP Live are documented in this file.
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-08-13
+
 ### Added
 
 - **LAN clients: "MCP server address" module setting.** The bridge URL was

@@ -392,7 +392,7 @@ Clients can still override with `localStorage.setItem("mcpBridgeToken", "…")` 
 
 ## Releasing a new version
 
-1. Bump `version` in [module/module.json](module/module.json), [server/package.json](server/package.json), and [server/server.js](server/server.js); refresh the root version metadata in `server/package-lock.json`.
+1. Bump `version` in [module/module.json](module/module.json) and [server/package.json](server/package.json), and refresh both root `version` fields in `server/package-lock.json` (top level and `packages[""]`). `server.js` needs no edit — `SERVER_VERSION` is read from `package.json` at startup. Move the `## [Unreleased]` entries in [CHANGELOG.md](CHANGELOG.md) under a dated `## [x.y.z]` heading.
 2. Commit, then tag and push: `git tag v0.5.2 && git push --tags`.
 3. The [release workflow](.github/workflows/release.yml) builds `module.zip` and publishes a GitHub Release with `module.json` + `module.zip` attached. The manifest URL `releases/latest/download/module.json` then points at the new version automatically, so Foundry's update check picks it up.
 
