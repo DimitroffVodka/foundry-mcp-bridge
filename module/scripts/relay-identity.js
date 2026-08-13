@@ -71,7 +71,13 @@ export function resolveClientId(store) {
  */
 export function describeClient(env = globalThis) {
   const ua = env.navigator?.userAgent ?? "";
-  const w = env.screen?.width, h = env.screen?.height;
+  // Physical pixels, not CSS pixels. screen.width is in CSS pixels and scales
+  // with devicePixelRatio, so a Steam Deck at dpr 0.8 reports 1600x1000 for a
+  // 1280x800 panel — which is how a real Deck failed a "is this 1280x800"
+  // check and got labelled a desktop.
+  const dpr = env.devicePixelRatio || 1;
+  const w = env.screen?.width ? Math.round(env.screen.width * dpr) : 0;
+  const h = env.screen?.height ? Math.round(env.screen.height * dpr) : 0;
   const size = w && h ? ` ${w}x${h}` : "";
   const platform =
     /SteamOS|Steam ?Deck/i.test(ua) ? "Steam Deck" :
