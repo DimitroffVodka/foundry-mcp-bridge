@@ -4,6 +4,45 @@ All notable changes to Foundry MCP Live are documented in this file.
 
 ## [Unreleased]
 
+## [0.19.0-beta.1] - 2026-08-13
+
+Pre-release. Published as a GitHub pre-release so it stays out of
+`releases/latest` and cannot offer itself as an update to anyone on stable.
+Install deliberately from its own manifest URL.
+
+### Added
+
+- **Foundry-mediated relay: reach clients the MCP server cannot dial.** The
+  direct bridge requires every execution target to be a network peer of the
+  server, which a remote device can never be — an https page cannot open
+  `ws://` to a private IP, and `localhost` on that device means that device.
+  A managed gateway browser on the MCP machine now joins the world as an
+  ordinary client and forwards signed requests over Foundry's own
+  authenticated socket to a target browser, where the existing handlers run
+  unchanged. Nothing is installed on the remote device; no tunnel, no token,
+  no firewall rule. Opt in with `FOUNDRY_RELAY_ENABLED=1`.
+- **Per-tab client identity.** A desktop and a Steam Deck signed in as the
+  same GM share a `userId`, and the direct registry had them silently evict
+  each other. Targets are now addressed by `clientId`, with device labels and
+  capabilities (including `gamepad`) advertised for routing. A bare shared
+  `userName` is refused as ambiguous rather than resolved by guess.
+- **`list_connected_bridges` reports relayed clients** alongside direct ones.
+- **Relayed `evaluate` is refused** unless a world setting permits it. In a
+  relay the receiving browser is the security boundary, not the server, so the
+  server's env gate no longer covers that path.
+
+### Security
+
+- Requests are ECDSA-signed and verified against a public key published in a
+  world setting — a trustworthy channel precisely because Foundry only lets
+  GMs write those. Results are sealed with ECDH+AES-GCM, so a broadcast
+  namespace where every client sees every packet cannot leak one client's
+  screenshots to another. Keys live in the Node process, never in the gateway
+  browser, which runs unattended.
+- **Known gap:** per-client keys (GM device pairing) are not implemented, so a
+  malicious authenticated client can still forge a *reply*. Not fit for
+  worlds with untrusted players until that lands.
+
 ### Fixed
 
 - **`wss://` bridge URLs no longer get port 3001 appended.** A page served over
