@@ -67,7 +67,7 @@ export function createRelayGateway({
 
     const joined = await page.evaluate(async ({ user, pass }) => {
       const form = document.querySelector("form#join-game, form.join-form, form");
-      if (!form) return { ok: false, reason: "no join form — already in a world?" };
+      if (!form) return { ok: false, reason: "no-join-form", at: location.href };
       const select = form.querySelector('select[name="userid"], select[name="userId"]');
       if (select) {
         const opt = [...select.options].find((o) => o.textContent.trim() === user);
@@ -81,7 +81,27 @@ export function createRelayGateway({
       return { ok: true };
     }, { user: gmUser, pass: gmPassword });
 
-    if (!joined.ok) throw new Error(`Gateway could not join: ${joined.reason}`);
+    if (!joined.ok) {
+      // "No join form" has several very different causes and guessing at one
+      // sends people debugging the wrong thing. /api/status distinguishes them
+      // in a single request, so ask rather than speculate.
+      if (joined.reason === "no-join-form") {
+        let status = null;
+        try { status = await (await fetch(new URL("/api/status", foundryUrl))).json(); } catch { /* unreachable */ }
+        if (status && status.active === false) {
+          throw new Error(
+            `No world is running on ${foundryUrl} — Foundry is sitting on the setup screen. ` +
+            `Launch a world, then start the gateway.`
+          );
+        }
+        throw new Error(
+          `Gateway reached ${joined.at} but found no join form. ` +
+          (status ? `Foundry reports world "${status.world}" active — the page may have been redirected.`
+                  : `Foundry's /api/status was unreachable, so it may be down.`)
+        );
+      }
+      throw new Error(`Gateway could not join: ${joined.reason}`);
+    }
 
     // Both waits below fail as a bare "Waiting failed: Nms exceeded", which
     // says nothing about which of several very different problems occurred.
