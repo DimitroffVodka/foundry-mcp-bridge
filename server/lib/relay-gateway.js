@@ -42,6 +42,7 @@ export function createRelayGateway({
   let page = null;
   let keys = null;
   let started = false;
+  let recovering = null;   // in-flight rejoin, so concurrent callers don't stampede
 
   async function launch() {
     const puppeteer = await import("puppeteer-core");
@@ -82,8 +83,45 @@ export function createRelayGateway({
 
     if (!joined.ok) throw new Error(`Gateway could not join: ${joined.reason}`);
 
-    await page.waitForFunction(() => globalThis.game?.ready === true, { timeout: 60_000 });
-    await page.waitForFunction(() => !!globalThis.mcpRelay, { timeout: 30_000 });
+    // Both waits below fail as a bare "Waiting failed: Nms exceeded", which
+    // says nothing about which of several very different problems occurred.
+    // Diagnose instead — these are the failures a first-time setup actually
+    // hits, and guessing between them costs more than the check does.
+    try {
+      await page.waitForFunction(() => globalThis.game?.ready === true, { timeout: 60_000 });
+    } catch {
+      const why = await page.evaluate(() => ({
+        url: location.href,
+        stillOnJoin: /\/join/.test(location.pathname),
+        notice: document.querySelector(".notification.error, .form-group .notes.error")?.textContent?.trim() || "",
+      })).catch(() => ({}));
+      throw new Error(
+        `Gateway joined the page but never reached game.ready (still at ${why.url || "unknown"}).` +
+        (why.notice ? ` Foundry said: "${why.notice}".` : "") +
+        (why.stillOnJoin
+          ? ` Still on the join screen — the most common causes are a password on "${gmUser}", ` +
+            `or that user already having an active session elsewhere (Foundry allows one per user, ` +
+            `so pointing the gateway at a human's login makes them fight over it). Give the gateway ` +
+            `its own GM-capable user.`
+          : "")
+      );
+    }
+
+    try {
+      await page.waitForFunction(() => !!globalThis.mcpRelay, { timeout: 30_000 });
+    } catch {
+      const mod = await page.evaluate(() => {
+        const m = globalThis.game?.modules?.get("foundry-mcp-live");
+        return { installed: !!m, active: !!m?.active, version: m?.version ?? null };
+      }).catch(() => ({}));
+      throw new Error(
+        !mod.installed ? "foundry-mcp-live is not installed on that Foundry."
+        : !mod.active  ? `foundry-mcp-live ${mod.version} is installed but not enabled in this world.`
+        : `foundry-mcp-live ${mod.version} is active but exposes no relay. The relay needs >= 0.19.0-beta.1 ` +
+          `with socket:true in module.json, and Foundry must be RESTARTED after installing it — package ` +
+          `socket events are dropped silently until it is.`
+      );
+    }
   }
 
   return {
@@ -118,9 +156,50 @@ export function createRelayGateway({
       return identity;
     },
 
+    /**
+     * Re-establish the gateway if its page has lost the relay.
+     *
+     * The Chromium process staying alive is NOT evidence the gateway works.
+     * The page can be sent back to the join screen underneath it — Foundry
+     * evicts a user's older session when the same user signs in elsewhere, and
+     * a world restart does it too. `globalThis.mcpRelay` then no longer exists,
+     * every call fails with "cannot read properties of undefined", and the
+     * gateway keeps reporting itself running. That state previously required a
+     * manual server restart to clear.
+     */
+    async ensureHealthy() {
+      if (!started) throw new Error("Relay gateway is not running.");
+      let alive = false;
+      try { alive = await page.evaluate(() => !!globalThis.mcpRelay); } catch { alive = false; }
+      if (alive) return true;
+
+      if (recovering) return recovering;          // collapse concurrent attempts
+      log("Relay gateway lost its Foundry session — rejoining…");
+      recovering = (async () => {
+        try {
+          await joinWorld();
+          const published = await keys.publish();
+          await page.evaluate(async (pub) => {
+            globalThis.mcpRelay.becomeGateway();
+            await globalThis.mcpRelay.publishGatewayKeys(pub);
+          }, published);
+          await new Promise((r) => setTimeout(r, DISCOVERY_SETTLE_MS));
+          log("Relay gateway rejoined.");
+          return true;
+        } catch (err) {
+          log(`ERROR: relay gateway could not rejoin: ${err?.message || err}`);
+          return false;
+        } finally {
+          recovering = null;
+        }
+      })();
+      return recovering;
+    },
+
     /** Browsers currently reachable through the relay. */
     async listClients() {
       if (!started) throw new Error("Relay gateway is not running.");
+      if (!(await this.ensureHealthy())) throw new Error("Relay gateway is not connected to Foundry.");
       return page.evaluate(() => globalThis.mcpRelay.listRelayClients());
     },
 
@@ -130,6 +209,7 @@ export function createRelayGateway({
      */
     async request(targetClientId, tool, params = {}, timeoutMs = 20_000) {
       if (!started) throw new Error("Relay gateway is not running.");
+      if (!(await this.ensureHealthy())) throw new Error("Relay gateway is not connected to Foundry.");
 
       const envelope = await signRequest({
         v: 1,

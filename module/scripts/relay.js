@@ -194,9 +194,23 @@ async function onRequest(packet) {
   }
 
   // Signature first: everything downstream trusts these fields.
+  //
+  // A failure here is ambiguous, and the benign case is common: the gateway
+  // generates a fresh keypair every time the MCP server restarts, so a client
+  // that has been open across a restart still holds the previous public key and
+  // rejects every request from the new gateway. Silently, and forever — the
+  // client keeps heartbeating so it looks perfectly healthy in the directory
+  // while every call to it times out.
+  //
+  // So on failure, re-read the published key once and retry before concluding
+  // forgery. A real forger simply fails twice.
   if (!(await verifyRequest(packet, state.verifyKey))) {
-    console.warn(`${MODULE_ID} | relay: rejected request ${packet.requestId} — bad signature`);
-    return; // stay silent; answering tells a forger their probe landed
+    const rotated = await loadGatewayKeys();
+    if (!rotated || !(await verifyRequest(packet, state.verifyKey))) {
+      console.warn(`${MODULE_ID} | relay: rejected request ${packet.requestId} — bad signature`);
+      return; // stay silent; answering tells a forger their probe landed
+    }
+    console.log(`${MODULE_ID} | relay: gateway key rotated — reloaded and accepted`);
   }
 
   const fresh = state.replay.check(packet, Date.now());
@@ -262,6 +276,13 @@ function onResponse(packet) {
 // ---------------------------------------------------------------------------
 // Gateway API — driven from Node over CDP
 // ---------------------------------------------------------------------------
+
+/** Drop cached gateway keys so the next packet re-reads the published pair. */
+export function notifyGatewayKeysRotated() {
+  if (!state) return;
+  state.verifyKey = null;
+  state.sealKey = null;
+}
 
 export function becomeGateway() {
   state.isGateway = true;
