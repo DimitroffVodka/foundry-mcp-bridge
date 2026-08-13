@@ -11,8 +11,13 @@
  *
  * Environment variables:
  *   FOUNDRY_WS_PORT           – WebSocket port for Foundry bridge  (default: 3001)
+ *   FOUNDRY_WS_HOST           – Bind address for that bridge       (default: 127.0.0.1;
+ *                               set 0.0.0.0 to let another device on the LAN connect)
  *   FOUNDRY_MCP_PORT          – HTTP port for MCP clients          (default: 3000)
  *   BRIDGE_TOKEN              – If set, required for HTTP + WS connections
+ *   FOUNDRY_WS_TOKEN          – Bridge-only token; overrides BRIDGE_TOKEN for the
+ *                               WebSocket half so you can secure a LAN-exposed
+ *                               bridge without adding auth to loopback MCP clients
  *   FOUNDRY_MCP_ALLOW_EVAL    – "1" enables the `evaluate` tool (off by default)
  */
 

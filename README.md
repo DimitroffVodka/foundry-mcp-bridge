@@ -328,8 +328,55 @@ You should get a 200 with an `mcp-session-id` header.
 | `FOUNDRY_CHROME_PATH` | empty | Absolute path to the Chrome/Chromium executable used by `puppeteer-core`. |
 | `FOUNDRY_CHROME_USER_DATA_DIR` | empty | Optional dedicated Chrome profile directory for the relaunched client. |
 | `FOUNDRY_RELAUNCH_ALLOW_REMOTE` | `0` | Set to `1` to allow a non-loopback `FOUNDRY_RELAUNCH_URL`. |
-| `FOUNDRY_WS_HOST` | `127.0.0.1` | Interface the bridge WebSocket binds to. Default is loopback. Override only if you knowingly want to expose the bridge to your LAN. |
-| `BRIDGE_TOKEN` | (unset) | Shared secret. If set, all MCP HTTP requests must send `Authorization: Bearer <token>` and the Foundry module must store the same value in `localStorage.mcpBridgeToken`. See [SECURITY.md](SECURITY.md). |
+| `FOUNDRY_WS_HOST` | `127.0.0.1` | Interface the bridge WebSocket binds to. Default is loopback. Set `0.0.0.0` to let another device on your LAN connect — see [Connecting a second device](#connecting-a-second-device-on-your-lan). |
+| `FOUNDRY_WS_TOKEN` | (falls back to `BRIDGE_TOKEN`) | Shared secret for the **WebSocket bridge only**. Each browser stores the same value in `localStorage.mcpBridgeToken`. Leaves loopback MCP clients unauthenticated. Use this when you expose the bridge with `FOUNDRY_WS_HOST`. |
+| `BRIDGE_TOKEN` | (unset) | Shared secret for **both** the bridge and the MCP HTTP endpoint. If set, all MCP HTTP requests must send `Authorization: Bearer <token>`. See [SECURITY.md](SECURITY.md). |
+
+## Connecting a second device on your LAN
+
+By default the bridge only works for a browser on the same machine as the MCP server. Everything else is the same as a local setup; two things have to change.
+
+**Why.** The module dials the MCP server over a WebSocket, and the server runs on exactly one machine. On a second device, "localhost" is that device — not the machine running the server. So the module resolves its target from the page host instead:
+
+| Foundry is at | Module dials | Because |
+|---|---|---|
+| `localhost:30000` | `ws://localhost:3001` | Server is on this same box |
+| `192.168.0.106:30000` | `ws://192.168.0.106:3001` | Server is on the Foundry box |
+| `https://your-world.example.com` | `ws://localhost:3001` | A hosted Foundry doesn't run your MCP server — you do |
+
+Override it per-browser with the **MCP server address** module setting (client-scoped, so each device sets its own). Accepts `192.168.0.106`, `192.168.0.106:3001`, or a full `ws://host:port`; port 3001 is assumed if omitted. Leave it blank to use the table above.
+
+**1. Expose the bridge port.** In `~/.config/foundry-mcp-live/server.env`:
+
+```sh
+FOUNDRY_WS_HOST=0.0.0.0
+FOUNDRY_WS_TOKEN=<paste output of: openssl rand -hex 24>
+```
+
+Then `systemctl --user restart foundry-mcp-live`. The MCP HTTP port (3000) stays bound to `127.0.0.1` either way — only the bridge is exposed.
+
+**Then open the port in your host firewall**, which is a separate thing from the bind address and easy to miss: the server will happily report `listening on ws://0.0.0.0:3001` while the firewall silently drops every packet from the other device. The failure looks identical to "the client isn't trying" — nothing in the server log at all, not even a rejection.
+
+```sh
+# ufw — scope it to your LAN, not the internet
+sudo ufw allow from 192.168.0.0/24 to any port 3001 proto tcp comment 'Foundry MCP bridge'
+
+# firewalld
+sudo firewall-cmd --permanent --add-rich-rule='rule family=ipv4 source address=192.168.0.0/24 port port=3001 protocol=tcp accept'
+sudo firewall-cmd --reload
+```
+
+Verify from the *other* device, not from the server — testing a host's own LAN IP from that same host doesn't traverse the firewall and will pass even when a real remote connection would be dropped. Browsing to `http://<server-ip>:3001` from the laptop is enough: a reachable bridge answers a plain HTTP request with an error page or an immediate close, whereas a blocked port hangs or refuses.
+
+**2. Tell the world the token, once.** As GM, open **Module Settings → Foundry MCP Live → MCP bridge token** and paste the same value. It's world-scoped, so Foundry hands it to every client that loads the world — the laptop, a tablet, a player's PC — with no per-device setup.
+
+Without a matching token the server closes the socket with code 1008 and the module raises a notification saying so (pointing the GM at the setting, and players at their GM).
+
+Clients can still override with `localStorage.setItem("mcpBridgeToken", "…")` in the browser console — useful when one client needs a different token than its world advertises. The world setting wins when both are set, so a stale hand-set value can't lock a client out of a world whose token has since been corrected.
+
+`FOUNDRY_WS_TOKEN` deliberately covers only the WebSocket half. `BRIDGE_TOKEN` also puts Bearer auth on `/mcp`, which breaks any MCP client that can't send a header — Codex has no per-server header config and would need `server/proxy.mjs` with `BRIDGE_TOKEN` in its env. Since `/mcp` is loopback-only anyway, the bridge-only token is the right tool for this job.
+
+**Don't skip the token.** With `FOUNDRY_WS_HOST=0.0.0.0` and no token, anything that can route to port 3001 can register as a GM bridge and drive your world — including the `evaluate` and world-authoring tools if those env gates are on. The server logs a warning at startup when it's bound off-loopback without one.
 
 ## Notes
 

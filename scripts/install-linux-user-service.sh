@@ -22,10 +22,17 @@ if [[ ! -f "$ENV_PATH" ]]; then
 # FOUNDRY_MCP_ALLOW_EVAL=1
 # FOUNDRY_MCP_ALLOW_SELF_TEST=1
 
-# Optional ports/hosts. Defaults are loopback-only.
+# Optional ports/hosts.
 # FOUNDRY_MCP_PORT=3000
 # FOUNDRY_WS_PORT=3001
-# FOUNDRY_WS_HOST=127.0.0.1
+
+# Bind address for the Foundry WebSocket bridge. 127.0.0.1 (the default) means
+# only a browser on THIS machine can reach it. Set 0.0.0.0 to expose it to the
+# LAN so a second device browsing Foundry over the network can connect its
+# bridge — pair that with FOUNDRY_WS_TOKEN below. Each such client also needs
+# the module's "MCP server address" setting pointed at this machine's LAN IP.
+# The MCP HTTP port is always loopback-bound regardless of this.
+# FOUNDRY_WS_HOST=0.0.0.0
 
 # Optional diagnostics/relaunch support.
 # FOUNDRY_URLS=http://localhost:30000
@@ -36,10 +43,22 @@ if [[ ! -f "$ENV_PATH" ]]; then
 # FOUNDRY_CHROME_PATH=/usr/bin/chromium
 # FOUNDRY_CHROME_USER_DATA_DIR=%h/.local/share/foundry-mcp-live/chrome-profile
 
-# Optional shared secret. If set, configure the same token in MCP clients and
-# in Foundry's browser localStorage.mcpBridgeToken.
+# Shared secret for the WebSocket bridge only. Strongly recommended whenever
+# FOUNDRY_WS_HOST is not loopback — without it, anything that can route to the
+# bridge port can register as a GM bridge. Generate one with:
+#   openssl rand -hex 24
+# Then, once per browser that connects:
+#   localStorage.setItem("mcpBridgeToken", "<token>")
+# This does NOT affect MCP clients on http://127.0.0.1:3000/mcp.
+# FOUNDRY_WS_TOKEN=
+
+# Shared secret for BOTH the bridge and the MCP HTTP endpoint. Setting this
+# requires every MCP client to send `Authorization: Bearer <token>` — Codex has
+# no per-server header config and would need server/proxy.mjs with BRIDGE_TOKEN
+# in its env. Prefer FOUNDRY_WS_TOKEN above unless you specifically want that.
 # BRIDGE_TOKEN=
 ENVEOF
+  chmod 600 "$ENV_PATH"
 fi
 
 cat > "$SERVICE_PATH" <<EOF
@@ -64,7 +83,8 @@ PrivateTmp=true
 WantedBy=default.target
 EOF
 
-chmod 644 "$SERVICE_PATH" "$ENV_PATH"
+chmod 644 "$SERVICE_PATH"
+chmod 600 "$ENV_PATH"   # may hold FOUNDRY_WS_TOKEN / BRIDGE_TOKEN
 
 if [[ ! -d "$SERVER_DIR/node_modules" ]]; then
   "$NPM_PATH" --prefix "$SERVER_DIR" install

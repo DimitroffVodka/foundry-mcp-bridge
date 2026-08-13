@@ -10,6 +10,8 @@ This is a **local developer tool**, not a production-grade service. The default 
 
 Both ports bind to `127.0.0.1` only — nothing is exposed to the LAN or the internet by default.
 
+The one supported way to widen that is `FOUNDRY_WS_HOST`, which exposes the **WebSocket bridge** (3001) so a second device on your LAN can connect its Foundry client. The MCP HTTP endpoint (3000) is bound to `127.0.0.1` in code and is not configurable. If you set `FOUNDRY_WS_HOST` to anything non-loopback, set `FOUNDRY_WS_TOKEN` with it — see [Opt-in: token auth](#opt-in-token-auth).
+
 If your environment doesn't fit those assumptions (shared workstation, public terminal, multi-tenant VPS), turn on the auth options below.
 
 ## What the bridge can do
@@ -25,7 +27,7 @@ Treat the MCP endpoint with the same trust you'd give a logged-in GM browser ses
 
 ## Built-in mitigations
 
-- **Loopback binding.** Both HTTP (3000) and WebSocket (3001) bind to `127.0.0.1`.
+- **Loopback binding.** HTTP (3000) binds to `127.0.0.1` unconditionally. WebSocket (3001) binds to `127.0.0.1` unless you deliberately widen it with `FOUNDRY_WS_HOST`; when you do and no bridge token is set, the server logs a warning at startup naming the exposure.
 - **CORS lockdown.** The HTTP server rejects any `Origin` header that isn't `localhost` / `127.0.0.1` / `[::1]`. CLI clients (no `Origin`) and the proxy.mjs stdio bridge are unaffected. A malicious site visited in another tab cannot POST to the MCP endpoint with a custom JSON Content-Type without a preflight, and the preflight gets a 403.
 - **`evaluate` is opt-in.** The most dangerous tool is disabled unless `FOUNDRY_MCP_ALLOW_EVAL=1` is set in the server's environment.
 - **World-authoring tools are opt-in.** `create_folder`, `create_actor`, `create_actor_from_compendium`, `add_items_to_actor`, `create_journal_entry`, and `update_journal_page` are disabled unless `FOUNDRY_MCP_ALLOW_WRITE=1` is set. With the gate off they aren't even registered, so they don't appear in any MCP client's tool list.
@@ -34,6 +36,34 @@ Treat the MCP endpoint with the same trust you'd give a logged-in GM browser ses
 - **Vendored dependencies.** `html2canvas` is bundled in `module/lib/`; the module never fetches code from a CDN at runtime.
 
 ## Opt-in: token auth
+
+There are two tokens, because the two endpoints have very different exposure.
+
+| Var | Gates | Use it when |
+|---|---|---|
+| `FOUNDRY_WS_TOKEN` | The WebSocket bridge only | You set `FOUNDRY_WS_HOST` to let a LAN device connect. Loopback MCP clients stay unauthenticated and keep working untouched. |
+| `BRIDGE_TOKEN` | The bridge **and** `/mcp` | You want Bearer auth on the HTTP endpoint too — a shared workstation, or defense-in-depth against local processes. |
+
+`FOUNDRY_WS_TOKEN` defaults to `BRIDGE_TOKEN`, so a single-token setup behaves exactly as it always has.
+
+Prefer `FOUNDRY_WS_TOKEN` for the LAN case. `/mcp` is bound to `127.0.0.1` in code and can't be reached off-box regardless, so putting Bearer auth on it buys nothing there — while costing you every MCP client that can't send a header.
+
+```bash
+# bridge only — the LAN case
+FOUNDRY_WS_TOKEN=$(openssl rand -hex 24)
+```
+
+**Who ends up holding the token.** The Foundry-side value lives in a world-scoped module setting, which Foundry serves to every client that loads the world. That is the point — it's what removes the per-device setup step — but it does mean the token is readable by anyone who can log into the world, not just the GM. The trade is deliberate:
+
+| Bridge binding | Who can register a bridge |
+|---|---|
+| `127.0.0.1` (default) | Anyone with access to the server machine |
+| Non-loopback, no token | **Anything that can route to the port** |
+| Non-loopback + world token | Anyone who can log into your Foundry world |
+
+The middle row is the one worth avoiding. The bottom row narrows the trusted set back down to your players — people already able to act in the world. If you need the token withheld from players too, leave the setting blank and set `localStorage.mcpBridgeToken` per client instead.
+
+### Both endpoints
 
 Set a shared secret when you want to require auth for every client and bridge:
 
@@ -56,7 +86,7 @@ With `BRIDGE_TOKEN` set, every connection must authenticate:
 | Codex CLI | `~/.codex/config.toml` → `[mcp_servers.foundry] http_headers = { Authorization = "Bearer YOUR_TOKEN" }` |
 | Gemini CLI | `.gemini/settings.json` → add `"headers": { "Authorization": "Bearer YOUR_TOKEN" }` next to the `url` |
 | Claude Code (HTTP transport) | `claude mcp add --transport http foundry-vtt http://127.0.0.1:3000/mcp -H "Authorization: Bearer YOUR_TOKEN"` |
-| Foundry browser module | In Foundry's browser console: `localStorage.setItem("mcpBridgeToken", "YOUR_TOKEN")` — then reload Foundry |
+| Foundry browser module | GM sets **Module Settings → Foundry MCP Live → MCP bridge token**. World-scoped, so every client in the world picks it up automatically. Per-client override: `localStorage.setItem("mcpBridgeToken", "YOUR_TOKEN")` in the browser console, then reload. |
 
 Without the matching token: HTTP returns `401`, WebSocket is closed with code `1008`.
 

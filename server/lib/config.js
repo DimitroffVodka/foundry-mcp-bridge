@@ -62,6 +62,21 @@ export const RELAUNCH_CONFIG   = {
 // trusts any localhost connection (current default behavior).
 export const BRIDGE_TOKEN     = process.env.BRIDGE_TOKEN ?? "";
 
+// Bridge-only secret. The two endpoints have very different exposure: the MCP
+// HTTP server is hard-bound to 127.0.0.1 (server.js) and can never be reached
+// off-box, while the WebSocket bridge is the half you deliberately open to the
+// LAN when a second device has to connect (FOUNDRY_WS_HOST). Gating both on
+// BRIDGE_TOKEN means you cannot secure the exposed half without also breaking
+// every loopback MCP client that can't send an Authorization header — Codex
+// has no per-server header config at all. FOUNDRY_WS_TOKEN gates only the
+// WebSocket hello, and defaults to BRIDGE_TOKEN so existing single-token
+// setups behave exactly as before.
+export const WS_TOKEN         = process.env.FOUNDRY_WS_TOKEN ?? BRIDGE_TOKEN;
+
+// True when the bridge port is reachable from somewhere other than this
+// machine. Used to decide whether an unauthenticated bridge is a real hazard.
+export const WS_HOST_IS_LOOPBACK = /^(127\.\d+\.\d+\.\d+|::1|localhost)$/i.test(WS_HOST);
+
 // `evaluate` runs arbitrary JS in the live Foundry browser context. Gated
 // behind an explicit opt-in to make the default install safer.
 export const ALLOW_EVAL       = /^(1|true|yes)$/i.test(process.env.FOUNDRY_MCP_ALLOW_EVAL ?? "");

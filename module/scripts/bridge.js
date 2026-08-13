@@ -22,6 +22,8 @@ import {
 } from "./scene-compat.js";
 import { runFoundrySelfTest } from "./self-test.js";
 import { shouldAutoConnect } from "./auto-connect.js";
+import { DEFAULT_BRIDGE_PORT, normalizeBridgeUrl, resolveBridgeUrl } from "./bridge-url.js";
+import { resolveBridgeToken } from "./bridge-token.js";
 
 const MODULE_ID = "foundry-mcp-live";
 
@@ -43,7 +45,10 @@ function requireSceneLevels(toolName) {
   }
 }
 
-const WS_URL = "ws://localhost:3001";
+// The bridge URL is resolved per-connect by currentBridgeUrl() rather than
+// frozen at load time, so the `bridgeUrl` client setting can repoint a client
+// without a world reload. Resolution logic lives in bridge-url.js so it can be
+// unit-tested outside the browser.
 const RECONNECT_DELAY = 5000;
 const MAX_ERRORS = 1000;
 const evaluationJobs = createRuntimeJobStore();
@@ -4324,22 +4329,40 @@ function warnServerOutdated(serverVersion, _serverProtocol) {
   }).catch(() => {});
 }
 
+/** The bridge URL this client should dial right now. See bridge-url.js. */
+function currentBridgeUrl() {
+  let configured = "";
+  // `ready` normally beats this, but mcpBridge.reconnect() can be called from
+  // the console before settings exist on a half-initialized world.
+  try { configured = game.settings?.get(MODULE_ID, "bridgeUrl") ?? ""; } catch { /* not registered yet */ }
+
+  if (String(configured).trim() && !normalizeBridgeUrl(configured)) {
+    console.warn(`${MODULE_ID} | Ignoring unparseable "MCP server address" setting: ${configured}`);
+  }
+  return resolveBridgeUrl({
+    configured,
+    hostname: globalThis.location?.hostname || "",
+  });
+}
+
 function connect() {
   if (ws?.readyState === WebSocket.OPEN || ws?.readyState === WebSocket.CONNECTING) return;
 
-  ws = new WebSocket(WS_URL);
+  const wsUrl = currentBridgeUrl();
+  ws = new WebSocket(wsUrl);
 
   ws.addEventListener("open", () => {
-    console.log(`${MODULE_ID} | Connected to MCP server at ${WS_URL}`);
+    console.log(`${MODULE_ID} | Connected to MCP server at ${wsUrl}`);
     ui.notifications?.info("MCP Bridge connected to Claude Desktop");
 
     // Identity handshake — server uses this to route targeted tool calls
     // to the right Foundry user. Server falls back to a legacy-GM
     // registration if this doesn't arrive within 500ms (backward compat
     // for older bridges that never sent a hello frame).
-    // If the server runs with BRIDGE_TOKEN set, the user must store the
-    // matching token in localStorage so we can echo it back here:
-    //   localStorage.setItem("mcpBridgeToken", "your-token")
+    // If the server requires a bridge token (FOUNDRY_WS_TOKEN / BRIDGE_TOKEN),
+    // we echo it back here. It comes from the world-scoped "MCP bridge token"
+    // setting the GM fills in once, or from a hand-set localStorage value.
+    // See bridge-token.js for the precedence rule.
     const helloFrame = {
       type:     "hello",
       userId:   game.user.id,
@@ -4358,10 +4381,16 @@ function connect() {
       moduleVersion:   game.modules.get(MODULE_ID)?.version || "",
       protocolVersion: MODULE_PROTOCOL_VERSION,
     };
-    try {
-      const t = localStorage.getItem("mcpBridgeToken");
-      if (t) helloFrame.token = t;
-    } catch { /* ignore */ }
+    // Each source is read defensively: the setting may not be registered (an
+    // older module in this world), and localStorage throws outright under some
+    // privacy modes. Either failing must not stop the handshake.
+    let worldSetting = "";
+    let localValue = "";
+    try { worldSetting = game.settings?.get(MODULE_ID, "bridgeToken") ?? ""; } catch { /* not registered */ }
+    try { localValue = localStorage.getItem("mcpBridgeToken") ?? ""; } catch { /* blocked */ }
+    const token = resolveBridgeToken({ worldSetting, localValue });
+    if (token) helloFrame.token = token;
+
     ws.send(JSON.stringify(helloFrame));
 
     // Expect a `hello-ack` carrying the server's version. If none arrives, the
@@ -4405,9 +4434,22 @@ function connect() {
     }
   });
 
-  ws.addEventListener("close", () => {
+  ws.addEventListener("close", (event) => {
     if (serverAckTimer) { clearTimeout(serverAckTimer); serverAckTimer = null; }
-    console.log(`${MODULE_ID} | Disconnected from MCP server, retrying in ${RECONNECT_DELAY / 1000}s...`);
+    // 1008 (policy violation) is only ever sent by the server for a bridge
+    // token mismatch. Reconnecting can't fix that, so say what to do instead of
+    // looping silently every 5s.
+    if (event?.code === 1008) {
+      const msg = game.user?.isGM
+        ? "Foundry MCP: the server rejected this world's bridge token. Set \"MCP bridge token\" in "
+          + "this module's settings to match FOUNDRY_WS_TOKEN (or BRIDGE_TOKEN) on the server — "
+          + "every client in the world picks it up automatically."
+        : "Foundry MCP: the bridge token this world advertises was rejected by the MCP server. "
+          + "Ask your GM to check \"MCP bridge token\" in the Foundry MCP Live module settings.";
+      console.error(`${MODULE_ID} | ${msg}`);
+      ui.notifications?.error(msg, { permanent: true });
+    }
+    console.log(`${MODULE_ID} | Disconnected from MCP server (${wsUrl}), retrying in ${RECONNECT_DELAY / 1000}s...`);
     scheduleReconnect();
   });
 
@@ -4463,6 +4505,54 @@ Hooks.once("init", () => {
     config: true,
     type: Boolean,
     default: true,
+  });
+
+  // Shared secret for the bridge handshake, needed only when the server sets
+  // FOUNDRY_WS_TOKEN / BRIDGE_TOKEN — which in practice means "the bridge port
+  // was opened to the LAN so a second device could connect". World-scoped on
+  // purpose: Foundry hands world settings to every client that loads the world,
+  // so the GM fills this in once and every device gets it automatically. That
+  // narrows who holds the token from "anything on the network" to "anyone who
+  // can log into this world", with no per-device devtools step.
+  game.settings.register(MODULE_ID, "bridgeToken", {
+    name: "MCP bridge token",
+    hint: "Leave blank unless your MCP server sets FOUNDRY_WS_TOKEN or BRIDGE_TOKEN. "
+        + "Paste the same value here and every client in this world authenticates "
+        + "automatically — no per-device setup. A hand-set localStorage.mcpBridgeToken "
+        + "is still honoured on clients where this is blank.",
+    scope: "world",
+    config: true,
+    type: String,
+    default: "",
+    onChange: () => {
+      // World settings propagate to every connected client, so each one drops
+      // its socket and re-handshakes with the new token on the next attempt.
+      try { ws?.close(); } catch { /* nothing open */ }
+    },
+  });
+
+  // Per-client address of the MCP server's WebSocket bridge. Blank = derive it
+  // from the page host (see resolveBridgeUrl). The case that needs this is a
+  // SECOND device: its browser's "localhost" is its own machine, not the box
+  // running the MCP server, so it has to be pointed at that box explicitly.
+  // The server must also be bound off-loopback for that to be reachable —
+  // FOUNDRY_WS_HOST=0.0.0.0 — which is why the hint mentions the README.
+  game.settings.register(MODULE_ID, "bridgeUrl", {
+    name: "MCP server address",
+    hint: "Leave blank to detect automatically (localhost, or this Foundry host's "
+        + "LAN IP when you're browsing it over the LAN). Set it when the server "
+        + "lives elsewhere — \"192.168.0.106\", \"192.168.0.106:3001\", or a full "
+        + `\"ws://host:port\". Port ${DEFAULT_BRIDGE_PORT} is assumed if you omit it. `
+        + "Reaching a server off-box also needs FOUNDRY_WS_HOST set on it — see the README.",
+    scope: "client",
+    config: true,
+    type: String,
+    default: "",
+    onChange: () => {
+      // Repoint without a world reload: drop the socket and let the close
+      // handler's scheduleReconnect() dial the new address.
+      try { ws?.close(); } catch { /* nothing open */ }
+    },
   });
 });
 

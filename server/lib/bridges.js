@@ -17,7 +17,7 @@
  * installs keep working until they're upgraded.
  */
 import { WebSocketServer } from "ws";
-import { WS_PORT, WS_HOST, HELLO_DEADLINE_MS, HEARTBEAT_INTERVAL_MS, BRIDGE_TOKEN, SERVER_VERSION, PROTOCOL_VERSION } from "./config.js";
+import { WS_PORT, WS_HOST, WS_HOST_IS_LOOPBACK, HELLO_DEADLINE_MS, HEARTBEAT_INTERVAL_MS, WS_TOKEN, SERVER_VERSION, PROTOCOL_VERSION } from "./config.js";
 import { log }                        from "./log.js";
 import { pendingRequests }            from "./foundry-rpc.js";
 
@@ -88,6 +88,16 @@ export function startBridgeServer() {
   // surface bind errors clearly with actionable hints.
   wss.on("listening", () => {
     log(`WebSocket bridge listening on ws://${WS_HOST}:${WS_PORT}`);
+    // Binding off-loopback is the deliberate "let a second device connect"
+    // move. Doing it without a token means anything that can route to this
+    // port can register as a GM bridge and drive the world — including the
+    // eval/write tools when those env gates are on. Loud, not fatal: the
+    // operator asked for the wider bind, so don't refuse to start.
+    if (!WS_HOST_IS_LOOPBACK && !WS_TOKEN) {
+      log(`WARNING: bridge is bound to ${WS_HOST} (reachable off this machine) with no token set. `
+        + `Any host that can reach ${WS_HOST}:${WS_PORT} can register as a GM bridge. `
+        + `Set FOUNDRY_WS_TOKEN and put the same value in each browser's localStorage.mcpBridgeToken.`);
+    }
   });
   wss.on("error", (err) => {
     if (err?.code === "EADDRINUSE") {
@@ -112,12 +122,12 @@ export function startBridgeServer() {
 
     // Schedule a deadline for the `hello` frame. If it doesn't arrive, the
     // bridge is from a pre-multi-user version — register as legacy GM so it
-    // still works (only when no BRIDGE_TOKEN is set; otherwise legacy
+    // still works (only when no bridge token is set; otherwise legacy
     // fallback bypasses auth so we close the socket instead).
     const helloTimer = setTimeout(() => {
       pendingHello.delete(socket);
-      if (BRIDGE_TOKEN) {
-        log("Bridge missed hello and BRIDGE_TOKEN is set — closing socket");
+      if (WS_TOKEN) {
+        log("Bridge missed hello and a bridge token is set — closing socket");
         socket.close(1008, "auth required");
         return;
       }
@@ -141,7 +151,7 @@ export function startBridgeServer() {
         const t = pendingHello.get(socket);
         if (t) { clearTimeout(t); pendingHello.delete(socket); }
 
-        if (BRIDGE_TOKEN && msg.token !== BRIDGE_TOKEN) {
+        if (WS_TOKEN && msg.token !== WS_TOKEN) {
           log(`Bridge hello rejected: invalid or missing token`);
           socket.close(1008, "auth failed");
           return;

@@ -6,6 +6,34 @@ All notable changes to Foundry MCP Live are documented in this file.
 
 ### Added
 
+- **LAN clients: "MCP server address" module setting.** The bridge URL was
+  hardcoded to `ws://localhost:3001`, so a second device on the network could
+  never connect — its "localhost" is itself, not the machine running the MCP
+  server. The URL is now resolved per-connect: blank (the default) derives it
+  from the page host when that host is loopback or RFC1918, and falls back to
+  `localhost` for public origins, since a hosted Foundry doesn't run your MCP
+  server. Client-scoped, so each device sets its own. Accepts `192.168.0.106`,
+  `192.168.0.106:3001`, or a full `ws://host:port`.
+- **"MCP bridge token" world setting.** The token was previously per-browser
+  localStorage, set through devtools — not something you can ask a normal user
+  or a player to do, and it had to be repeated on every device. It's now a
+  world-scoped setting the GM fills in once; Foundry hands world settings to
+  every client that loads the world, so each device authenticates with no setup
+  of its own. localStorage is still read as a per-client override, with the
+  world setting winning when both are present so a stale hand-set value can't
+  lock a client out of a world whose token has since been corrected.
+- **`FOUNDRY_WS_TOKEN`** — a bridge-only secret, defaulting to `BRIDGE_TOKEN`.
+  Exposing the bridge with `FOUNDRY_WS_HOST` needs auth, but `BRIDGE_TOKEN`
+  also puts Bearer auth on `/mcp`, which breaks MCP clients that can't send a
+  header (Codex has no per-server header config). Since `/mcp` is bound to
+  `127.0.0.1` in code and unreachable off-box anyway, the two are now separable.
+- **Startup warning when the bridge is exposed without a token.** Binding
+  off-loopback with no `FOUNDRY_WS_TOKEN`/`BRIDGE_TOKEN` lets anything that can
+  route to the port register as a GM bridge; the server now says so on boot.
+- **Token rejection is visible.** A close with code 1008 (the server's only use
+  of it is a token mismatch) now raises a permanent Foundry notification naming
+  the `localStorage.mcpBridgeToken` fix, instead of reconnect-looping silently.
+
 - **Tool-usage telemetry.** Every MCP tool call is recorded — to an in-memory
   aggregate served at `GET /api/usage` and to a per-call JSONL log
   (`server/usage-telemetry.jsonl`). A single wrapper at the tool-registration
