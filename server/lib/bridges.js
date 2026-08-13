@@ -17,7 +17,7 @@
  * installs keep working until they're upgraded.
  */
 import { WebSocketServer } from "ws";
-import { WS_PORT, WS_HOST, WS_HOST_IS_LOOPBACK, HELLO_DEADLINE_MS, HEARTBEAT_INTERVAL_MS, WS_TOKEN, SERVER_VERSION, PROTOCOL_VERSION } from "./config.js";
+import { WS_PORT, WS_HOST, WS_HOST_IS_LOOPBACK, HELLO_DEADLINE_MS, HEARTBEAT_INTERVAL_MS, WS_TOKEN, SERVER_VERSION, SERVER_ROOT, PROTOCOL_VERSION } from "./config.js";
 import { log }                        from "./log.js";
 import { pendingRequests }            from "./foundry-rpc.js";
 
@@ -44,6 +44,11 @@ export function routeBridge(targetUser) {
     // Prefer a real (hello-identified) GM over the legacy fallback bucket
     // — otherwise a transient `__legacy__` entry that registered first
     // could win the default route even when a real GM is also connected.
+    // Also skip "Bridge" users — they're MCP plumbing, not the actual GM.
+    for (const b of bridges.values()) {
+      if (b.isGM && b.userId !== "__legacy__" && b.userName !== "Bridge") return b;
+    }
+    // Fall back to Bridge user if no real GM is available.
     for (const b of bridges.values()) {
       if (b.isGM && b.userId !== "__legacy__") return b;
     }
@@ -204,6 +209,9 @@ export function startBridgeServer() {
             type: "hello-ack",
             serverVersion: SERVER_VERSION,
             protocolVersion: PROTOCOL_VERSION,
+            // Lets the out-of-date dialog print a `cd` that actually works
+            // rather than guessing at ~/foundry-mcp-live.
+            serverRoot: SERVER_ROOT,
           }));
         } catch { /* socket may have closed; ignore */ }
 

@@ -66,6 +66,7 @@ const MODULE_PROTOCOL_VERSION = 1;
 const SERVER_ACK_TIMEOUT_MS = 6000;
 let serverAckTimer = null;      // pending "did the server identify itself?" timer
 let serverOutdatedNotified = false; // show the blocking dialog at most once/session
+let serverRootPath = "";           // repo dir the server reports in hello-ack, for accurate update commands
 
 async function _runEvaluation(expression) {
   const t0 = performance.now();
@@ -4281,9 +4282,16 @@ function warnServerOutdated(serverVersion, _serverProtocol) {
   if (!DialogV2) return;
   // Raw command text (what the Copy buttons put on the clipboard — plain, so it
   // pastes cleanly into a terminal or an AI assistant).
+  //
+  // The path comes from the server's hello-ack, not a guess. This used to
+  // hardcode `cd ~/foundry-mcp-live`, which is wrong for anyone who cloned
+  // anywhere else — the copied command then failed with "no such directory",
+  // sending the user to debug a path instead of updating their server. A
+  // command that cannot work is worse than no command.
+  const repoDir = serverRootPath || "/path/to/foundry-mcp-live";
   const STEPS = {
-    linux: "cd ~/foundry-mcp-live && git pull\ncd server && npm install\nsystemctl --user restart foundry-mcp-live",
-    manual: "git pull            # or re-download the latest release\ncd server && npm install\n# then restart the server: start.bat (Windows) or start.sh (Linux/macOS)",
+    linux: `cd ${repoDir} && git pull\ncd server && npm install\nsystemctl --user restart foundry-mcp-live`,
+    manual: `cd ${repoDir}\ngit pull            # or re-download the latest release\ncd server && npm install\n# then restart the server: start.bat (Windows) or start.sh (Linux/macOS)`,
   };
   // Opens the README's "Updating the server" section in a new browser tab.
   const GUIDE_URL = "https://github.com/DimitroffVodka/foundry-mcp-live#updating-the-server";
@@ -4417,6 +4425,7 @@ function connect() {
     // Server identity reply (not a tool call) — version compatibility check.
     if (request.type === "hello-ack") {
       if (serverAckTimer) { clearTimeout(serverAckTimer); serverAckTimer = null; }
+      if (typeof request.serverRoot === "string") serverRootPath = request.serverRoot;
       checkServerVersion(request.serverVersion, request.protocolVersion);
       return;
     }
