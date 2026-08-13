@@ -29,6 +29,7 @@ import {
   resolveClientId,
   detectCapabilities,
   createPresenceDirectory,
+  describeClient,
 } from "./relay-identity.js";
 import {
   importVerifyKey,
@@ -135,28 +136,10 @@ function presencePacket() {
     userId: game.user?.id ?? "",
     userName: game.user?.name ?? "",
     isGM: !!game.user?.isGM,
-    label: describeThisClient(),
+    label: `${game.user?.name ?? "?"} — ${describeClient()}`,
     capabilities: detectCapabilities(),
     worldId: game.world?.id ?? "",
   };
-}
-
-/** Human-facing device label. The GM picks a target from this, so it has to be recognisable. */
-function describeThisClient() {
-  const ua = navigator.userAgent || "";
-  const platform =
-    /SteamOS|Steam Deck/i.test(ua) ? "Steam Deck" :
-    /Android/i.test(ua) ? "Android" :
-    /iPhone|iPad/i.test(ua) ? "iOS" :
-    /Windows/i.test(ua) ? "Windows" :
-    /Mac OS/i.test(ua) ? "macOS" :
-    /Linux/i.test(ua) ? "Linux" : "Unknown";
-  const browser =
-    /Firefox\//.test(ua) ? "Firefox" :
-    /Edg\//.test(ua) ? "Edge" :
-    /Chrome\//.test(ua) ? "Chrome" :
-    /Safari\//.test(ua) ? "Safari" : "browser";
-  return `${game.user?.name ?? "?"} — ${platform} ${browser}`;
 }
 
 function startHeartbeat() {
@@ -335,5 +318,23 @@ export function teardownRelay() {
 
 export function startRelay() {
   startHeartbeat();
+
+  // The direct bridge pops a toast when its socket opens. The relay showed
+  // nothing at all, so on a device that can only ever be relayed (a Deck, a
+  // tablet) there was no signal it was working — the absence of the familiar
+  // toast read as "not connected". Announce it, and name the device so it can
+  // be matched against the target list.
+  const label = `${game.user?.name ?? "?"} — ${describeClient()}`;
+  loadGatewayKeys().then((ready) => {
+    if (ready) {
+      ui.notifications?.info(`Foundry MCP: this device is available to the MCP server as "${label}".`);
+    } else {
+      ui.notifications?.warn(
+        `Foundry MCP: relay active on this device ("${label}") but no MCP gateway is running for this world yet. ` +
+        `It becomes reachable once the server's gateway connects.`
+      );
+    }
+  }).catch(() => {});
+
   return { clientId: state.clientId, bootId: state.bootId };
 }

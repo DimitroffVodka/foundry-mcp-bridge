@@ -60,6 +60,35 @@ export function resolveClientId(store) {
  * a headless gateway has no canvas, so it must not be picked for PIXI work,
  * and only a device with a gamepad can answer gamepad queries.
  */
+/**
+ * Human-facing device label.
+ *
+ * Screen size is included because platform strings alone are not
+ * distinguishable in practice: SteamOS's Firefox reports plain
+ * "X11; Linux x86_64", identical to a desktop. Without a size, a Steam Deck
+ * (1280x800) and a desktop window are the same string, and picking the wrong
+ * target is silent.
+ */
+export function describeClient(env = globalThis) {
+  const ua = env.navigator?.userAgent ?? "";
+  const w = env.screen?.width, h = env.screen?.height;
+  const size = w && h ? ` ${w}x${h}` : "";
+  const platform =
+    /SteamOS|Steam ?Deck/i.test(ua) ? "Steam Deck" :
+    (w === 1280 && h === 800) || (w === 1200 && h === 800) ? "Steam Deck?" :
+    /Android/i.test(ua) ? "Android" :
+    /iPhone|iPad/i.test(ua) ? "iOS" :
+    /Windows/i.test(ua) ? "Windows" :
+    /Mac OS/i.test(ua) ? "macOS" :
+    /Linux/i.test(ua) ? "Linux" : "Unknown";
+  const browser =
+    /Firefox\//.test(ua) ? "Firefox" :
+    /Edg\//.test(ua) ? "Edge" :
+    /Chrome\//.test(ua) ? "Chrome" :
+    /Safari\//.test(ua) ? "Safari" : "browser";
+  return `${platform} ${browser}${size}`;
+}
+
 export function detectCapabilities(env = globalThis) {
   const hasCanvas = !!env.canvas?.app?.renderer;
   let gamepad = false;

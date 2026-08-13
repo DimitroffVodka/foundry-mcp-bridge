@@ -30,16 +30,45 @@ export const pendingRequests = new Map();
  * waiting for a player to click the dialog button).
  */
 export async function requestFoundry(tool, params = {}, targetUser, timeoutMs = REQUEST_TIMEOUT) {
-  // Relay first when the target names a client that is only reachable through
-  // Foundry. A remote device can never hold a direct bridge socket — an https
-  // page cannot open ws:// to a private IP, and `localhost` on that device
-  // means that device — so the direct registry will never contain it. Checking
-  // the direct path first would make the miss a dead end instead of a fallback.
+  // Direct bridge first, relay only as a fallback.
+  //
+  // These paths are not equivalent, so preferring the wrong one is not merely
+  // slower. The relay applies its own gates — relayed `evaluate` is refused
+  // unless a world setting permits it — so routing a call to the relay when a
+  // direct socket exists silently changes which rules apply to it. It also
+  // adds a broadcast round trip through Foundry for no reason.
+  //
+  // The relay's purpose is targets the direct bridge CANNOT reach: a remote
+  // device can never hold a direct socket, since an https page cannot open
+  // ws:// to a private IP and `localhost` there means that device.
+  if (isDirectlyReachable(targetUser)) {
+    return requestOverDirectBridge(tool, params, targetUser, timeoutMs);
+  }
+
   if (relayAvailable()) {
     const target = resolveRelayTarget(await relayClients(), targetUser);
     if (target) return getRelayGateway().request(target.clientId, tool, params, timeoutMs);
   }
+
+  // Nothing can serve it. Go through the direct path anyway so the caller gets
+  // its canonical "no bridge connected for X, connected: ..." error rather than
+  // one invented here.
   return requestOverDirectBridge(tool, params, targetUser, timeoutMs);
+}
+
+/**
+ * Whether a live direct socket exists for this target. Checked before
+ * dispatching rather than by catching a failure, because a rejection from
+ * requestOverDirectBridge is ambiguous — "no such bridge" and "the tool threw"
+ * look the same, and retrying the latter over the relay would run it twice.
+ */
+function isDirectlyReachable(targetUser) {
+  try {
+    const bridge = routeBridge(targetUser);
+    return !!bridge?.socket && bridge.socket.readyState === 1;
+  } catch {
+    return false;
+  }
 }
 
 function requestOverDirectBridge(tool, params, targetUser, timeoutMs) {
