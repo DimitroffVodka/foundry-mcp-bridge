@@ -6,6 +6,13 @@ All notable changes to Foundry MCP Live are documented in this file.
 
 ### Fixed
 
+- **`wss://` bridge URLs no longer get port 3001 appended.** A page served over
+  https cannot open `ws://` to a private IP — mixed content blocks it before a
+  packet leaves the browser — so the only route for a remote device (a Steam
+  Deck, a tablet) is a TLS proxy: Tailscale Serve, a tunnel, nginx. Those listen
+  on 443. Port defaulting is now scheme-aware: `wss://host` stays `wss://host`,
+  while bare `host` and `ws://host` still get the bridge's 3001.
+
 - **Document `::` rather than `0.0.0.0` for `FOUNDRY_WS_HOST`.** `0.0.0.0` is
   IPv4-only, so a browser that resolves `localhost` to `::1` finds nothing
   listening and fails with a bare "can't establish a connection". Every

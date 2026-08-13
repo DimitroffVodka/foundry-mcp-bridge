@@ -51,12 +51,19 @@ export function isLocalNetworkHost(hostname) {
 export function normalizeBridgeUrl(value) {
   let raw = String(value ?? "").trim();
   if (!raw) return "";
-  if (!/^wss?:\/\//i.test(raw)) raw = `ws://${raw}`;
+  const hadScheme = /^wss?:\/\//i.test(raw);
+  if (!hadScheme) raw = `ws://${raw}`;
   let url;
   try { url = new URL(raw); } catch { return ""; }
   if (!url.hostname) return "";
-  if (!url.port) url.port = String(DEFAULT_BRIDGE_PORT);
-  return `${url.protocol}//${url.host}`;
+  // Port defaulting is scheme-aware. A bare `wss://host` means the bridge sits
+  // behind a TLS proxy — Tailscale Serve, a tunnel, a reverse proxy — which
+  // listens on 443, not on the bridge's own port. Appending 3001 there would
+  // silently produce an address nothing answers on. Only plain ws:// (and bare
+  // "host" / "host:port" input, which we prefixed with ws:// above) gets the
+  // bridge default.
+  if (!url.port && url.protocol === "ws:") url.port = String(DEFAULT_BRIDGE_PORT);
+  return url.port ? `${url.protocol}//${url.host}` : `${url.protocol}//${url.hostname}`;
 }
 
 /**

@@ -65,11 +65,24 @@ test("the setting accepts what a person would actually type", () => {
     ["192.168.0.106:9999",        "ws://192.168.0.106:9999"],
     ["ws://192.168.0.106:3001",   "ws://192.168.0.106:3001"],
     ["  192.168.0.106  ",         `ws://192.168.0.106:${DEFAULT_BRIDGE_PORT}`],
-    ["wss://tunnel.example.com",  "wss://tunnel.example.com:3001"],
   ];
   for (const [input, expected] of cases) {
     assert.equal(normalizeBridgeUrl(input), expected, `input: ${JSON.stringify(input)}`);
   }
+});
+
+test("a wss:// URL keeps the TLS default port, not the bridge port", () => {
+  // A page served over https cannot open ws:// to a private IP — mixed content
+  // blocks it — so the only route for a remote device is a TLS proxy (Tailscale
+  // Serve, a tunnel, nginx). Those listen on 443. Appending 3001 would produce
+  // an address nothing answers on, and the failure looks like a dead bridge.
+  assert.equal(normalizeBridgeUrl("wss://box.tailnet.ts.net"), "wss://box.tailnet.ts.net");
+  assert.equal(normalizeBridgeUrl("wss://tunnel.example.com"), "wss://tunnel.example.com");
+});
+
+test("an explicit port is respected on either scheme", () => {
+  assert.equal(normalizeBridgeUrl("wss://box.ts.net:8443"), "wss://box.ts.net:8443");
+  assert.equal(normalizeBridgeUrl("ws://box.ts.net:9000"), "ws://box.ts.net:9000");
 });
 
 test("blank means auto, not a malformed URL", () => {
