@@ -24,6 +24,10 @@ import { runFoundrySelfTest } from "./self-test.js";
 import { shouldAutoConnect } from "./auto-connect.js";
 import { DEFAULT_BRIDGE_PORT, normalizeBridgeUrl, resolveBridgeUrl } from "./bridge-url.js";
 import { resolveBridgeToken } from "./bridge-token.js";
+import {
+  initRelay, startRelay, becomeGateway, publishGatewayKeys,
+  listRelayClients, sendSignedRequest,
+} from "./relay.js";
 
 const MODULE_ID = "foundry-mcp-live";
 
@@ -4507,6 +4511,36 @@ Hooks.once("init", () => {
     default: true,
   });
 
+  // Gateway public keys for the Foundry-mediated relay, published by the MCP
+  // server through its gateway browser. Not user-facing (config: false) — it's
+  // machine data. World-scoped is the load-bearing part: Foundry only lets GMs
+  // WRITE world settings, which is what makes this a trustworthy publication
+  // channel for a public key. Every client can read it (they're public keys);
+  // a player cannot substitute their own and start issuing signed requests.
+  game.settings.register(MODULE_ID, "relayGatewayKeys", {
+    scope: "world",
+    config: false,
+    type: String,
+    default: "",
+  });
+
+  // Whether `evaluate` may be dispatched over the relay. Off by design: in a
+  // relay the RECEIVING browser is the security boundary, not the MCP server —
+  // a relayed packet reaches a handler without passing through the server's
+  // FOUNDRY_MCP_ALLOW_EVAL gate at all. Arbitrary JS crossing a broadcast
+  // channel into someone else's browser is a different risk from arbitrary JS
+  // in your own, so it needs its own consent.
+  game.settings.register(MODULE_ID, "relayAllowEvaluate", {
+    name: "Allow `evaluate` over the relay",
+    hint: "Off by default. When off, remote clients refuse relayed `evaluate` calls even "
+        + "if the MCP server has evaluation enabled. Only turn this on if you trust every "
+        + "GM-capable user in this world.",
+    scope: "world",
+    config: true,
+    type: Boolean,
+    default: false,
+  });
+
   // Shared secret for the bridge handshake, needed only when the server sets
   // FOUNDRY_WS_TOKEN / BRIDGE_TOKEN — which in practice means "the bridge port
   // was opened to the LAN so a second device could connect". World-scoped on
@@ -4572,7 +4606,54 @@ Hooks.once("ready", () => {
   } else {
     console.log(`${MODULE_ID} | Auto-connect disabled on this client — enable "Auto-connect to MCP server" in Module Settings or run mcpBridge.reconnect() to connect on demand.`);
   }
+
+  // The relay runs on EVERY client, independent of the direct bridge. A remote
+  // device can never open the direct socket (an https page cannot reach ws://
+  // on a private IP), so the relay is the only way it is ever addressable —
+  // and it costs a heartbeat.
+  try {
+    initRelay({ dispatch: dispatchRelayTool });
+    const id = startRelay();
+    console.log(`${MODULE_ID} | Relay ready — clientId ${id.clientId} (boot ${id.bootId})`);
+  } catch (err) {
+    // A missing secure context is the expected failure (plain http:// LAN page,
+    // where WebCrypto is unavailable). Not fatal: the direct bridge still works
+    // there, which is exactly the legacy path that case is meant to use.
+    console.warn(`${MODULE_ID} | Relay unavailable: ${err?.message || err}`);
+  }
 });
+
+/**
+ * Run a relayed tool in this browser.
+ *
+ * The gates that live on the MCP server do not protect this path — a relayed
+ * packet reaches a handler without the server in the loop — so the ones that
+ * matter are re-asserted here, behind the signature check relay.js has already
+ * performed.
+ */
+async function dispatchRelayTool(tool, params) {
+  const handler = handlers[tool];
+  if (!handler) throw new Error(`Unknown tool: ${tool}`);
+
+  if (tool === "evaluate" && !game.settings.get(MODULE_ID, "relayAllowEvaluate")) {
+    throw new Error(
+      "`evaluate` is not permitted over the relay in this world. Enable "
+      + '"Allow `evaluate` over the relay" in the module settings to change that.'
+    );
+  }
+  return handler(params ?? {});
+}
+
+// Gateway control surface. Driven from Node over CDP — deliberately not a
+// network listener, because an in-page socket to localhost would put the
+// gateway itself back under Chrome's Local Network Access checks, which is the
+// problem this whole design exists to escape.
+globalThis.mcpRelay = {
+  becomeGateway,
+  publishGatewayKeys,
+  listRelayClients,
+  sendSignedRequest,
+};
 
 // Expose for debugging from Foundry console
 globalThis.mcpBridge = {

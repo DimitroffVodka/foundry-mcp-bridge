@@ -16,6 +16,7 @@
 import { randomUUID } from "crypto";
 import { REQUEST_TIMEOUT } from "./config.js";
 import { routeBridge }     from "./bridges.js";
+import { relayAvailable, relayClients, resolveRelayTarget, getRelayGateway } from "./relay-runtime.js";
 
 export const pendingRequests = new Map();
 
@@ -28,7 +29,20 @@ export const pendingRequests = new Map();
  * Used by tools that legitimately need to wait longer (e.g. `request_roll`
  * waiting for a player to click the dialog button).
  */
-export function requestFoundry(tool, params = {}, targetUser, timeoutMs = REQUEST_TIMEOUT) {
+export async function requestFoundry(tool, params = {}, targetUser, timeoutMs = REQUEST_TIMEOUT) {
+  // Relay first when the target names a client that is only reachable through
+  // Foundry. A remote device can never hold a direct bridge socket — an https
+  // page cannot open ws:// to a private IP, and `localhost` on that device
+  // means that device — so the direct registry will never contain it. Checking
+  // the direct path first would make the miss a dead end instead of a fallback.
+  if (relayAvailable()) {
+    const target = resolveRelayTarget(await relayClients(), targetUser);
+    if (target) return getRelayGateway().request(target.clientId, tool, params, timeoutMs);
+  }
+  return requestOverDirectBridge(tool, params, targetUser, timeoutMs);
+}
+
+function requestOverDirectBridge(tool, params, targetUser, timeoutMs) {
   return new Promise((resolve, reject) => {
     let bridge;
     try { bridge = routeBridge(targetUser); }

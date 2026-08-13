@@ -55,6 +55,24 @@ export const RELAUNCH_CONFIG   = {
   autoMaxBackoffMs: Number.parseInt(process.env.FOUNDRY_RELAUNCH_AUTO_MAX_BACKOFF_MS ?? "", 10) || 300_000,
 };
 
+// --- Relay gateway ---------------------------------------------------------
+// A managed browser on this machine that joins Foundry as an ordinary client
+// and relays tool calls to browsers the MCP server cannot reach directly —
+// phones, tablets, a Steam Deck, anything on a hosted world. Off by default:
+// it launches a real Chromium, so it should be an explicit choice.
+export const RELAY_CONFIG = {
+  enabled: /^(1|true|yes)$/i.test(process.env.FOUNDRY_RELAY_ENABLED ?? ""),
+  foundryUrl: process.env.FOUNDRY_RELAY_URL ?? process.env.FOUNDRY_RELAUNCH_URL ?? "",
+  // Must be GM-capable: publishing the gateway's public keys writes a world
+  // setting, and Foundry only lets GMs do that. That restriction is what makes
+  // the setting a trustworthy channel for the key in the first place.
+  gmUser: process.env.FOUNDRY_RELAY_GM_USER ?? process.env.FOUNDRY_RELAUNCH_GM_USER ?? "",
+  gmPassword: process.env.FOUNDRY_RELAY_GM_PASSWORD ?? process.env.FOUNDRY_RELAUNCH_GM_PASSWORD ?? "",
+  chromePath: process.env.FOUNDRY_CHROME_PATH ?? "",
+  userDataDir: process.env.FOUNDRY_RELAY_USER_DATA_DIR ?? "",
+  headless: !/^(0|false|no)$/i.test(process.env.FOUNDRY_RELAY_HEADLESS ?? "1"),
+};
+
 // --- Security knobs (off by default; opt in via env vars) -----------------
 // When BRIDGE_TOKEN is set, every MCP HTTP request must include the
 // `Authorization: Bearer <token>` header, and every Foundry WebSocket hello

@@ -27,7 +27,9 @@ import { createMcpExpressApp }            from "@modelcontextprotocol/sdk/server
 import { randomUUID }                     from "crypto";
 
 import { log }                            from "./lib/log.js";
-import { HTTP_PORT, BRIDGE_TOKEN, ALLOW_EVAL, SERVER_VERSION, RELAUNCH_CONFIG } from "./lib/config.js";
+import { HTTP_PORT, BRIDGE_TOKEN, ALLOW_EVAL, SERVER_VERSION, RELAUNCH_CONFIG, RELAY_CONFIG } from "./lib/config.js";
+import { createRelayGateway }            from "./lib/relay-gateway.js";
+import { setRelayGateway }               from "./lib/relay-runtime.js";
 import { startBridgeServer, bridges }     from "./lib/bridges.js";
 import { startHotReloadWatcher }          from "./lib/hot-reload.js";
 import { registerTools }                  from "./tools/index.js";
@@ -52,6 +54,23 @@ const relaunchSupervisor = createRelaunchSupervisor({
   logger: log,
 });
 relaunchSupervisor.start();
+
+// Relay gateway (opt-in): a managed browser that joins Foundry and relays tool
+// calls to clients the MCP server cannot reach directly. Startup is
+// deliberately non-fatal — it launches a real browser and logs into a world,
+// both of which can fail for reasons that shouldn't take the whole server down
+// with them. The direct bridge keeps working either way.
+if (RELAY_CONFIG.enabled) {
+  const gateway = createRelayGateway(RELAY_CONFIG);
+  setRelayGateway(gateway);
+  gateway.start().catch((err) => {
+    log(`ERROR: relay gateway failed to start: ${err?.message || err}`);
+    log("Relayed clients are unavailable; the direct bridge is unaffected.");
+    setRelayGateway(null);
+  });
+} else {
+  log("Relay gateway OFF (set FOUNDRY_RELAY_ENABLED=1 to reach remote clients).");
+}
 
 // ---------------------------------------------------------------------------
 // HTTP / MCP server — stateful session management so multiple clients work

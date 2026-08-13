@@ -12,6 +12,7 @@ import { FOUNDRY_URLS, RELAUNCH_CONFIG }    from "../lib/config.js";
 import { diagnoseBridgeStatus }             from "../lib/bridge-status.js";
 import { relaunchClient }                   from "../lib/relaunch.js";
 import { requestFoundry }                   from "../lib/foundry-rpc.js";
+import { relayClients }                     from "../lib/relay-runtime.js";
 import { registerRawTool }                  from "./_helpers.js";
 
 function getBridgeDiagnosis() {
@@ -63,6 +64,34 @@ export function registerServerLocalTools(mcp) {
       }
 
       const result = { bridges: list };
+
+      // Relayed clients are reached through Foundry rather than a direct
+      // socket, so they never appear in `bridges` — but they are exactly as
+      // targetable, and for a remote device they are the ONLY way to target
+      // it. Listing them separately keeps the distinction visible (a relayed
+      // client depends on the gateway being up) without hiding them.
+      try {
+        const relayed = await relayClients();
+        if (relayed.length) {
+          result.relayedClients = relayed
+            .map((c) => ({
+              clientId:     c.clientId,
+              label:        c.label,
+              userName:     c.userName,
+              isGM:         c.isGM,
+              capabilities: c.capabilities,
+              lastSeenMsAgo: c.ageMs,
+              // clientId is always unambiguous; a shared userName is not,
+              // which is the collision the direct registry gets wrong.
+              targetUser:   c.clientId,
+            }))
+            .sort((a, b) => a.label.localeCompare(b.label));
+          result.relayNote = "Relayed clients are reached through Foundry's own socket via the "
+            + "gateway browser. Address them by `clientId` or device label — a shared `userName` "
+            + "is ambiguous when one person is signed in on two devices.";
+        }
+      } catch { /* gateway down or mid-restart; direct bridges still listed */ }
+
       if (bridges.has("__legacy__")) {
         result.legacyBridgeConnected = true;
         result.note = "A pre-multi-user bridge is connected and is being treated as the default GM. "

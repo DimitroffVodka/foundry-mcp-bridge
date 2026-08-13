@@ -1,7 +1,7 @@
 {
   "id": "foundry-mcp-live",
   "title": "Foundry MCP Live",
-  "description": "Live WebSocket bridge between Foundry VTT and MCP-compatible AI clients (Claude Desktop, Claude Code, Codex CLI, Gemini CLI). Exposes the running game state — actors, compendiums, console, scene — for real-time tool calls.",
+  "description": "Live WebSocket bridge between Foundry VTT and MCP-compatible AI clients (Claude Desktop, Claude Code, Codex CLI, Gemini CLI). Exposes the running game state \u2014 actors, compendiums, console, scene \u2014 for real-time tool calls.",
   "version": "0.18.0",
   "compatibility": {
     "minimum": "13",
@@ -15,7 +15,7 @@
   "esmodules": [
     "scripts/bridge.js"
   ],
-  "socket": false,
+  "socket": true,
   "url": "https://github.com/DimitroffVodka/foundry-mcp-live",
   "manifest": "https://github.com/DimitroffVodka/foundry-mcp-live/releases/latest/download/module.json",
   "download": "https://github.com/DimitroffVodka/foundry-mcp-live/releases/latest/download/module.zip",
