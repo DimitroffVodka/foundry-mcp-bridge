@@ -15,6 +15,16 @@ try {
 } catch { /* keep fallback */ }
 export const SERVER_VERSION = _serverVersion;
 
+// Absolute path to the repo root. Reported to the module in the hello-ack so
+// the "server is out of date" dialog can print a `cd` that actually works.
+// It previously hardcoded `~/foundry-mcp-live`, which is wrong for anyone who
+// cloned anywhere else — the copied command then fails with "no such
+// directory", which is a worse experience than no command at all.
+export const SERVER_ROOT = (() => {
+  try { return new URL("../..", import.meta.url).pathname.replace(/\/$/, ""); }
+  catch { return ""; }
+})();
+
 // Wire-protocol version. Bump ONLY when the module↔server contract changes in
 // a breaking way (new required handshake field, renamed tool semantics, etc.)
 // — NOT on every release. The module compares this against its own and warns
