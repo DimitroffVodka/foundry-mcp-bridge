@@ -4,6 +4,40 @@ All notable changes to Foundry MCP Live are documented in this file.
 
 ## [Unreleased]
 
+## [0.19.0-beta.3] - 2026-08-13
+
+### Fixed
+
+- **Gateway key rotation orphaned every open client.** The gateway mints a new
+  keypair on each server restart; clients only loaded the public key when they
+  had none, so any client open across a restart kept verifying against the old
+  one and silently rejected everything. It carried on heartbeating, so the
+  directory reported it healthy while every call to it timed out — which is
+  what a whole afternoon of "the device is connected but does not answer"
+  actually was. Clients now re-read the published key on a verification failure
+  before concluding forgery.
+- **The gateway reported itself running after losing its Foundry session.**
+  Foundry evicts a user's older session when that user signs in elsewhere,
+  sending the gateway page back to the join screen while its Chromium process
+  lives on. It now checks for its relay before each use and rejoins itself
+  instead of requiring a server restart.
+- **The relay directory served stale data on a failed read**, so devices that
+  had joined stayed invisible and departed ones looked present. A read failure
+  is now reported rather than hidden behind the last good snapshot.
+- **Direct bridge is preferred over the relay** when both can reach a target.
+  The relay applies its own gates, so silently routing through it changed which
+  rules applied to a call.
+- **Devices are identified by physical pixels**, not CSS pixels. A Steam Deck at
+  devicePixelRatio 0.8 reports 1600x1000 for its 1280x800 panel, so a real Deck
+  was labelled a desktop.
+
+### Added
+
+- **Relayed clients announce themselves.** The direct bridge pops a toast on
+  connect; the relay showed nothing, so a device that can only ever be relayed
+  gave no sign it was working. It now says so on load, and warns distinctly
+  when no gateway is running for the world.
+
 ## [0.19.0-beta.2] - 2026-08-13
 
 ### Fixed
