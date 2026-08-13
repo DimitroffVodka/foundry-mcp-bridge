@@ -27,12 +27,18 @@ if [[ ! -f "$ENV_PATH" ]]; then
 # FOUNDRY_WS_PORT=3001
 
 # Bind address for the Foundry WebSocket bridge. 127.0.0.1 (the default) means
-# only a browser on THIS machine can reach it. Set 0.0.0.0 to expose it to the
-# LAN so a second device browsing Foundry over the network can connect its
-# bridge — pair that with FOUNDRY_WS_TOKEN below. Each such client also needs
-# the module's "MCP server address" setting pointed at this machine's LAN IP.
+# only a browser on THIS machine can reach it. Set :: to expose it to the LAN
+# so a second device browsing Foundry over the network can connect its bridge —
+# pair that with FOUNDRY_WS_TOKEN below. Remember to open the port in your host
+# firewall too; the bind address alone is not enough.
+#
+# Use :: rather than 0.0.0.0: 0.0.0.0 is IPv4-only, so a browser that resolves
+# "localhost" to ::1 finds nothing listening and fails with no useful error,
+# while shell-based checks pass because they fall back to IPv4. :: binds IPv6
+# and accepts IPv4 via v4-mapped addresses.
+#
 # The MCP HTTP port is always loopback-bound regardless of this.
-# FOUNDRY_WS_HOST=0.0.0.0
+# FOUNDRY_WS_HOST=::
 
 # Optional diagnostics/relaunch support.
 # FOUNDRY_URLS=http://localhost:30000

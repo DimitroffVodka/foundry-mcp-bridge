@@ -349,9 +349,11 @@ Override it per-browser with the **MCP server address** module setting (client-s
 **1. Expose the bridge port.** In `~/.config/foundry-mcp-live/server.env`:
 
 ```sh
-FOUNDRY_WS_HOST=0.0.0.0
+FOUNDRY_WS_HOST=::
 FOUNDRY_WS_TOKEN=<paste output of: openssl rand -hex 24>
 ```
+
+Use `::`, not `0.0.0.0`. `0.0.0.0` is IPv4-only, so a browser that resolves `localhost` to `::1` finds nothing listening and fails with a bare "can't establish a connection" — while every check you run from a shell passes, because command-line clients fall back to IPv4 and browsers may not. `::` binds IPv6 and still accepts IPv4 through v4-mapped addresses, so `localhost`, `127.0.0.1`, `[::1]` and the LAN IP all work regardless of what the browser's resolver prefers.
 
 Then `systemctl --user restart foundry-mcp-live`. The MCP HTTP port (3000) stays bound to `127.0.0.1` either way — only the bridge is exposed.
 

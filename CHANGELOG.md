@@ -4,6 +4,16 @@ All notable changes to Foundry MCP Live are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Document `::` rather than `0.0.0.0` for `FOUNDRY_WS_HOST`.** `0.0.0.0` is
+  IPv4-only, so a browser that resolves `localhost` to `::1` finds nothing
+  listening and fails with a bare "can't establish a connection". Every
+  shell-based check passes, because command-line clients fall back to IPv4 and
+  browsers may not — so the bridge looks reachable from the server while a real
+  client can't reach it. `::` binds IPv6 and accepts IPv4 via v4-mapped
+  addresses, so every address form works regardless of resolver preference.
+
 ## [0.18.0] - 2026-08-13
 
 ### Added
