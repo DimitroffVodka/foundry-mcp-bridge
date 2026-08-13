@@ -6,6 +6,7 @@
  * layer is imported by every tool. server.js sets the instance once at startup;
  * everything else asks for it here.
  */
+import { log } from "./log.js";
 
 let gateway = null;
 
@@ -28,12 +29,22 @@ export async function relayClients({ force = false } = {}) {
   if (!force && now - cache.at < CACHE_MS) return cache.clients;
   try {
     const clients = await gateway.listClients();
-    cache = { at: now, clients };
+    cache = { at: now, clients, error: null };
     return clients;
-  } catch {
-    return cache.clients;   // a transient CDP failure shouldn't erase the directory
+  } catch (err) {
+    // Do NOT keep serving the last good snapshot. A frozen directory is
+    // indistinguishable from a live one at the call site — devices that have
+    // since joined stay invisible and devices that left look present, and the
+    // caller has no way to tell. A read failure is information; hiding it
+    // behind stale data turns a diagnosable fault into a mystery.
+    cache = { at: now, clients: [], error: err?.message || String(err) };
+    log(`WARNING: relay directory read failed — ${cache.error}`);
+    return [];
   }
 }
+
+/** Why the last directory read failed, if it did. Surfaced by the tools. */
+export function relayDirectoryError() { return cache.error ?? null; }
 
 /**
  * Resolve a user-supplied target to a relay client.
