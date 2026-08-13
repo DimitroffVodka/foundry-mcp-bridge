@@ -4,6 +4,18 @@ All notable changes to Foundry MCP Live are documented in this file.
 
 ## [Unreleased]
 
+## [0.19.0-beta.2] - 2026-08-13
+
+### Fixed
+
+- **Released manifests pointed installers at the wrong version.** `download`
+  (and, for a pre-release, `manifest`) were left pointing at
+  `releases/latest`. Installing 0.19.0-beta.1 therefore made Foundry fetch the
+  *stable* zip and install 0.18.0 — no error, because the manifest genuinely
+  told it to. The release workflow now pins `download` to the tag's own asset,
+  and pins `manifest` too for pre-releases so a beta cannot resolve itself back
+  to an older stable.
+
 ## [0.19.0-beta.1] - 2026-08-13
 
 Pre-release. Published as a GitHub pre-release so it stays out of
