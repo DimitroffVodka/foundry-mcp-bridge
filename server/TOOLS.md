@@ -950,7 +950,7 @@ List every scene in the world. Use to enumerate available scenes when you only k
 - **Returns**: `[{ id, name, active, folder }]` per scene.
 
 ### `place_measured_template`
-Drop a MeasuredTemplate onto a scene (fireball circle, cone, wall ray, rectangle) for spell areas of effect. The template is created immediately at the given coordinates — no preview/place UX.
+Drop a MeasuredTemplate onto a scene (fireball circle, cone, wall ray, rectangle) for spell areas of effect. The template is created immediately at the given coordinates — no preview/place UX. On Foundry v14+, templates are stored as Region documents (v14 merged MeasuredTemplate into Region); the tool returns the same template fields on both versions.
 
 - **Params**:
   - `type?` — `"circle"` (default), `"cone"`, `"rect"`, or `"ray"`.

@@ -1092,6 +1092,91 @@ const capturePlans = {
 // ---------------------------------------------------------------------------
 // Request handlers — each returns serialisable data
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// v14 template compatibility — Foundry v14 merged MeasuredTemplate into the
+// Region document: templates are now Region documents flagged
+// `flags.core.MeasuredTemplate`. Constructing a MeasuredTemplateDocument (or
+// touching `Scene#templates` / `CONST.MEASURED_TEMPLATE_TYPES`) logs
+// deprecation warnings and will hard-fail in v16, so on v14+ read and write
+// the Region storage directly. v13 and below keep the legacy collection.
+// ---------------------------------------------------------------------------
+function isV14() {
+  return Number(game.release?.generation) >= 14;
+}
+
+function isTemplateRegion(region) {
+  return !!region?.getFlag?.("core", "MeasuredTemplate");
+}
+
+// Reverse-map a template-flagged Region back to the legacy template source
+// shape. Mirrors core's MeasuredTemplateDocument._fromRegion (foundry.mjs
+// v14) without instantiating the deprecated class.
+function regionToTemplateData(region, scene) {
+  const shape = region.shapes?.at?.(0) ?? region.shapes?.[0];
+  let grid = scene.grid;
+  if (grid && !shape?.gridBased && !grid.isGridless) {
+    const GridlessGrid = foundry.canvas?.grid?.GridlessGrid ?? globalThis.GridlessGrid;
+    if (GridlessGrid) grid = new GridlessGrid({ size: grid.size, distance: grid.distance });
+  }
+  const distancePixels = grid ? grid.size / grid.distance : 1;
+  let t = "circle", x = 0, y = 0, distance = 0, direction = 0, angle = 0, width = 0;
+  switch (shape?.type) {
+    case "circle": {
+      t = "circle";
+      x = shape.x;
+      y = shape.y;
+      distance = shape.radius / distancePixels;
+      break;
+    }
+    case "cone": {
+      t = "cone";
+      x = shape.x;
+      y = shape.y;
+      distance = shape.radius / distancePixels;
+      direction = shape.rotation;
+      angle = shape.angle;
+      break;
+    }
+    case "rectangle": {
+      t = "rect";
+      x = shape.x;
+      y = shape.y;
+      distance = grid.measurePath([{ x: 0, y: 0 }, { x: shape.width, y: shape.height }]).distance;
+      let w = grid.measurePath([{ x: 0, y: 0 }, { x: shape.width, y: 0 }]).distance;
+      let h = grid.measurePath([{ x: 0, y: 0 }, { x: 0, y: shape.height }]).distance;
+      const rotation = shape.rotation.toNearest(90, "floor");
+      if (rotation === 90) [w, h] = [-h, w];
+      else if (rotation === 180) [w, h] = [-w, -h];
+      else if (rotation === 270) [w, h] = [h, -w];
+      direction = Math.toDegrees(Math.atan2(h, w));
+      width = w;
+      break;
+    }
+    case "line": {
+      t = "ray";
+      x = shape.x;
+      y = shape.y;
+      distance = shape.length / distancePixels;
+      direction = shape.rotation;
+      width = shape.width;
+      break;
+    }
+  }
+  const author = Object.keys(region.ownership ?? {}).find(k => k !== "default") ?? null;
+  return {
+    _id: region.id,
+    author,
+    t, x, y,
+    elevation: region.elevation?.bottom ?? 0,
+    distance, direction, angle, width,
+    borderColor: "#000000",
+    fillColor: region.color,
+    texture: null,
+    hidden: region.visibility !== (CONST.REGION_VISIBILITY?.ALWAYS ?? "always"),
+    flags: region.flags ?? {}
+  };
+}
+
 const handlers = {
 
   /**
@@ -3546,7 +3631,6 @@ const handlers = {
     // Map of accepted type → embedded-collection name on the Scene document.
     const COLLECTIONS = {
       Token:            "tokens",
-      MeasuredTemplate: "templates",
       Region:           "regions",
       Wall:             "walls",
       AmbientLight:     "lights",
@@ -3556,12 +3640,23 @@ const handlers = {
       Tile:             "tiles"
     };
     const key = COLLECTIONS[type];
-    if (!key) throw new Error(`Unsupported placeable type "${type}". Allowed: ${Object.keys(COLLECTIONS).join(", ")}`);
+    if (!key && type !== "MeasuredTemplate") {
+      throw new Error(`Unsupported placeable type "${type}". Allowed: ${Object.keys(COLLECTIONS).join(", ")}, MeasuredTemplate`);
+    }
 
-    const collection = scene[key];
-    if (!collection) return { sceneId: scene.id, type, count: 0, items: [] };
-
-    let items = collection.contents.map(doc => doc.toObject());
+    let items;
+    if (type === "MeasuredTemplate" && isV14()) {
+      // v14 stores MeasuredTemplates as Region documents flagged
+      // `flags.core.MeasuredTemplate`. Reading `scene.templates` instantiates
+      // the deprecated MeasuredTemplateDocument (console warnings; hard error
+      // in v16), so map from the Region collection instead. The emitted
+      // objects keep the legacy template source shape.
+      items = scene.regions.contents.filter(isTemplateRegion).map(r => regionToTemplateData(r, scene));
+    } else {
+      const collection = scene[key];
+      if (!collection) return { sceneId: scene.id, type, count: 0, items: [] };
+      items = collection.contents.map(doc => doc.toObject());
+    }
 
     // Optional projection — caller passes dotted paths like "behaviors.type".
     // For arrays in the path, we map across each element. Drastically reduces
@@ -3719,20 +3814,45 @@ const handlers = {
       if (texture) data.texture = texture;
       if (flags && typeof flags === "object") data.flags = flags;
 
-      const [created] = await scene.createEmbeddedDocuments("MeasuredTemplate", [data]);
+      let created;
+      if (isV14()) {
+        // v14-native path: templates are Region documents flagged
+        // `flags.core.MeasuredTemplate`. Building the Region via core's own
+        // template→region migration (`BaseRegion._migrateMeasuredTemplateData`,
+        // the exact code `MeasuredTemplateDocument.createDocuments` runs)
+        // keeps geometry handling identical to core — minus the deprecation
+        // warnings. Note: the migration's `gridTemplates` / `coneTemplateType`
+        // options are themselves deprecated settings in v14 (hidden, no UI),
+        // so we rely on the migration defaults, which match core's.
+        const BaseRegion = foundry.documents?.BaseRegion ?? globalThis.BaseRegion;
+        if (typeof BaseRegion?._migrateMeasuredTemplateData !== "function") {
+          throw new Error("This Foundry v14 build lacks BaseRegion._migrateMeasuredTemplateData — cannot place a template.");
+        }
+        const templateData = { ...data, author: game.user.id };
+        delete templateData.user;
+        const regionData = BaseRegion._migrateMeasuredTemplateData(templateData, {
+          grid: scene.grid,
+          users: game.users.contents
+        });
+        foundry.utils.setProperty(regionData, "flags.core.MeasuredTemplate", true);
+        [created] = await scene.createEmbeddedDocuments("Region", [regionData]);
+      } else {
+        [created] = await scene.createEmbeddedDocuments("MeasuredTemplate", [data]);
+      }
       if (!created) throw new Error("MeasuredTemplate.create returned no document");
 
+      const tpl = isV14() ? regionToTemplateData(created, scene) : created;
       return {
-        id: created.id,
+        id: tpl._id ?? tpl.id,
         sceneId: scene.id,
-        type: created.t,
-        x: created.x,
-        y: created.y,
-        distance: created.distance,
-        direction: created.direction,
-        angle: created.angle,
-        width: created.width,
-        hidden: created.hidden
+        type: tpl.t,
+        x: tpl.x,
+        y: tpl.y,
+        distance: tpl.distance,
+        direction: tpl.direction,
+        angle: tpl.angle,
+        width: tpl.width,
+        hidden: tpl.hidden
       };
     });
   },

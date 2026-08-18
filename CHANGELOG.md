@@ -4,6 +4,22 @@ All notable changes to Foundry MCP Live are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **v14 deprecation errors when placing/reading measured templates.** Foundry
+  v14 merged `MeasuredTemplateDocument` into the Region document, and every
+  legacy `MeasuredTemplate` embedded-document operation logged three
+  deprecation errors in the console (MeasuredTemplateDocument,
+  `CONST.MEASURED_TEMPLATE_TYPES`, `Scene#templates`). `place_measured_template`
+  now creates templates the v14-native way (a Region flagged
+  `flags.core.MeasuredTemplate`, built through core's own
+  `BaseRegion._migrateMeasuredTemplateData`), and `get_scene_placeables`
+  reads them back from the Region collection. v13 and below keep the legacy
+  collection path. Tool parameters and return shapes are unchanged. (The
+  migration's `gridTemplates`/`coneTemplateType` inputs are themselves
+  deprecated settings in v14, so the tool uses the migration defaults, which
+  match core's.)
+
 ## [0.19.0-beta.3] - 2026-08-13
 
 ### Fixed

@@ -538,7 +538,10 @@ export function registerWorldAuthoringTools(mcp) {
   registerRoutedTool(mcp, "place_measured_template",
     "Drop a MeasuredTemplate onto a scene (fireball circle, cone, wall ray, "
     + "rectangle). Used for spell areas of effect. The template is created "
-    + "immediately at the given coordinates — no preview/place UX.",
+    + "immediately at the given coordinates — no preview/place UX. On Foundry "
+    + "v14+, templates are stored as Region documents (v14 merged "
+    + "MeasuredTemplate into Region); the tool returns the same template "
+    + "fields on both versions.",
     {
       type:      z.enum(["circle", "cone", "rect", "ray"]).optional().describe("Template shape. Default 'circle'."),
       x:         z.number().describe("X pixel coordinate of the template origin."),
