@@ -4,6 +4,37 @@ All notable changes to Foundry MCP Live are documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- **Merged 54 tools down to ~32 with action-discriminator tools (2026-08-19
+  merge pass).** `list` (actors/scenes/modules/tables/compendiums),
+  `document` (actor/item/compendium/actorItems), `chat` (send/read),
+  `scene_read` (summary/placeables), `token` (details/move/create/update/
+  delete/toggleCondition/target/setLevel), `request` (roll/check/itemUse),
+  `trace` (hooks/socket/workflow), `snapshot` (take/diff), `interact`
+  (click/dialog). `place_measured_template` cut (v14 templates are Regions;
+  reachable via `evaluate`). Bridge handlers unchanged — all merges are
+  server-side routing. Also fixed a latent gating bug: `list_scenes` was
+  registered in both `canvas.js` and the write-gated `world-authoring.js`
+  (the gated one won), so scene listing required `FOUNDRY_MCP_ALLOW_WRITE=1`.
+  Behavior notes: `token` create is now ungated like its sibling token
+  mutations (the per-world read-only toggle still guards it);
+  `chat` send is write-gated at call time; the per-routed-tool `targetUser`
+  description was shortened (~40 tools × ~250 bytes saved).
+
+### Removed
+
+- **Deleted 14 low-use tools (68 → 54 registered) to cut per-request schema
+  context.** Telemetry (13.7k calls, Jun 24–Aug 18) showed these accounted for
+  ~25 calls combined: `folder`, `scene_level`, `get_macro`, `list_macros` (zero
+  uses) and `get_active_effects`, `get_selected_token`,
+  `list_region_behavior_types`, `actor_ownership`, `get_scene_levels`,
+  `actor_items`, `list_items`, `list_journals`, `journal`, `region` (1–8 uses).
+  Their operations remain reachable via `evaluate`
+  (`FOUNDRY_MCP_ALLOW_EVAL=1` is on in this deployment); the module-side
+  bridge handlers are unchanged. TOOLS.md, AGENTS.md, and the docs test
+  fixture updated to match.
+
 ### Fixed
 
 - **v14 deprecation errors when placing/reading measured templates.** Foundry

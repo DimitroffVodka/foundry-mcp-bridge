@@ -58,8 +58,8 @@ const DOCS = [
 ];
 
 test("tool registrations parse to a plausible set (guards a broken regex)", () => {
-  assert.ok(REGISTERED.size >= 50, `only parsed ${REGISTERED.size} tools — registration regex likely drifted`);
-  for (const staple of ["get_actor", "move_token", "folder", "actor_write", "evaluate"]) {
+  assert.ok(REGISTERED.size >= 30, `only parsed ${REGISTERED.size} tools — registration regex likely drifted`);
+  for (const staple of ["list", "document", "token", "request", "trace", "snapshot", "interact", "chat", "scene_read", "actor_write", "evaluate"]) {
     assert.ok(REGISTERED.has(staple), `expected staple tool "${staple}" among registrations`);
   }
 });
