@@ -138,18 +138,30 @@ export function registerServerLocalTools(mcp) {
     + "re-read by the browser. Targets the GM by default; pass `targetUser` "
     + "for a specific player tab. Saves the manual reload + sleep + poll "
     + "dance and avoids the 'Server not initialized' race that happens when "
-    + "you call MCP tools too soon after a raw `evaluate(window.location.reload())`.",
+    + "you call MCP tools too soon after a raw `evaluate(window.location.reload())`.\n\n"
+    + "Set `hardReload: true` to clear the browser's Cache API and unregister "
+    + "service workers before reloading — use this after editing bridge/module "
+    + "code to guarantee Foundry picks up the new JS/CSS instead of serving stale "
+    + "cached files. Default (false) does a cache-busting location.replace() which "
+    + "busts the HTML cache but not module/service-worker caches.",
     {
       targetUser: z.string().optional().describe(
         'Foundry user whose tab to reload. Omit (or pass "GM" / "self") to '
         + 'target the GM (default). Pass a player\'s exact user name to reload '
         + 'their tab. Use list_connected_bridges to see who is currently connected.'
       ),
+      hardReload: z.boolean().optional().describe(
+        "Clear Cache API caches and unregister service workers before reloading. "
+        + "Default false. Set true after editing bridge/module JS to bypass "
+        + "Foundry's service-worker and module cache."
+      ),
       timeoutMs: z.number().optional().describe(
-        "Total ms to wait for reconnect AND game.ready. Default 30000 (30s)."
+        "Total ms to wait for reconnect AND game.ready. Default 30000 (30s). "
+        + "Hard reloads may need extra time for cache revalidation — bump to "
+        + "60000 if service worker re-registration is slow."
       ),
     },
-    async ({ targetUser, timeoutMs = 30_000 }) => {
+    async ({ targetUser, hardReload = false, timeoutMs = 30_000 }) => {
       let bridge;
       try { bridge = routeBridge(targetUser); }
       catch (err) {
@@ -173,23 +185,37 @@ export function registerServerLocalTools(mcp) {
       const targetUserName = bridge.userName;
       const reloadStartedAt = Date.now();
 
-      // Issue a hard reload via existing evaluate. Default `window.location.reload()`
-      // is a soft reload that may serve cached JS modules — exactly what
-      // breaks "I edited code, refresh the runtime" workflow. Use a query-
-      // param cache-bust + replace() to force a fresh fetch of every asset.
+      // Issue a reload via evaluate. Two modes:
+      //   soft (default): cache-busting query-param on location.replace() —
+      //     bypasses the HTML cache but NOT the service-worker / module cache.
+      //   hard (hardReload=true): clears all Cache API caches, unregisters
+      //     service workers for this origin, then forces a hard reload.
       // The setTimeout(50) gives the eval a chance to return before the
       // browser navigates away. Reply may never arrive (socket closes
       // mid-handler) — that's expected, so we ignore failures here and
       // proceed straight to the wait.
+      const reloadExpr = hardReload
+        ? "setTimeout(async () => { "
+        +   "try { "
+        +     "const keys = await caches.keys(); "
+        +     "await Promise.all(keys.map(k => caches.delete(k))); "
+        +   "} catch(e) {} "
+        +   "try { "
+        +     "const regs = await navigator.serviceWorker?.getRegistrations?.(); "
+        +     "if (regs) await Promise.all(regs.map(r => r.unregister())); "
+        +   "} catch(e) {} "
+        +   "window.location.reload(); "
+        + "}, 50); "
+        + "'cache cleared + reloading'"
+        : "setTimeout(() => { "
+        +   "const u = new URL(window.location.href); "
+        +   "u.searchParams.set('_mcpReload', Date.now()); "
+        +   "window.location.replace(u.toString()); "
+        + "}, 50); "
+        + "'reloading'";
       try {
         await requestFoundry("evaluate", {
-          expression:
-            "setTimeout(() => { "
-            + "  const u = new URL(window.location.href); "
-            + "  u.searchParams.set('_mcpReload', Date.now()); "
-            + "  window.location.replace(u.toString()); "
-            + "}, 50); "
-            + "'reloading'",
+          expression: reloadExpr,
         }, targetUserId);
       } catch { /* expected — socket closes during reload */ }
 

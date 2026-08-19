@@ -26,7 +26,7 @@ import { DEFAULT_BRIDGE_PORT, normalizeBridgeUrl, resolveBridgeUrl } from "./bri
 import { resolveBridgeToken } from "./bridge-token.js";
 import {
   initRelay, startRelay, becomeGateway, publishGatewayKeys,
-  listRelayClients, sendSignedRequest,
+  listRelayClients, sendSignedRequest, notifyGatewayKeysRotated,
 } from "./relay.js";
 
 const MODULE_ID = "foundry-mcp-live";
@@ -872,6 +872,27 @@ const DISPATCHERS = {
 };
 
 /**
+ * System-aware invokers for items whose roll path lives on the *actor* data
+ * model rather than the item (so `item.use()`/`item.roll()` don't exist).
+ * Each entry returns a zero-arg thunk that fires the system's own card-
+ * producing method, or null when the item isn't a fit — letting `use_item`
+ * capture the authentic chat card instead of reimplementing the roll.
+ */
+const SYSTEM_ITEM_INVOKERS = {
+  shadowdark: (actor, item, params = {}) => {
+    const isWeapon = item.type === "Weapon" || item.system?.isWeapon;
+    if (!isWeapon || typeof actor.system?.rollAttack !== "function") return null;
+    // Same path the sheet's [data-action="item-attack"] button calls via
+    // ActorSheetSD#_onRollAttack; skipPrompt bypasses the roll dialog.
+    const config = { skipPrompt: true };
+    // attackType forces the ability used: "melee" (STR) vs "ranged" (DEX) —
+    // e.g. throwing a thrown weapon. Omitted → system default weapon.system.type.
+    if (params.attackType) config.attack = { type: params.attackType };
+    return () => actor.system.rollAttack(item.uuid, config);
+  },
+};
+
+/**
  * Normalise a generic roll result into the canonical MCP shape.
  */
 function _normalizeRollResult(systemId, rawRoll, actor, dc) {
@@ -1467,20 +1488,29 @@ const handlers = {
   get_scene: () => {
     const scene = game.scenes.active;
     if (!scene) return { error: "No active scene" };
+    const fogMode = scene.fog?.mode ?? 0;
+    const fogExploration = fogMode > 0; // mode 0=OFF, 1=MANUAL, 2=SHARED
     return {
       id: scene.id,
       name: scene.name,
       dimensions: { width: scene.width, height: scene.height },
       grid: { size: scene.grid.size, type: scene.grid.type },
-      tokens: scene.tokens.contents.map(t => ({
-        id: t.id,
-        name: t.name,
-        actorId: t.actorId,
-        x: t.x,
-        y: t.y,
-        elevation: t.elevation,
-        hidden: t.hidden
-      }))
+      fog: { mode: fogMode, exploration: fogExploration },
+      tokens: scene.tokens.contents.map(t => {
+        const cx = t.x + t.width / 2;
+        const cy = t.y + t.height / 2;
+        const inExplored = fogExploration ? (canvas?.fog?.isPointExplored?.({x: cx, y: cy}) ?? true) : true;
+        return {
+          id: t.id,
+          name: t.name,
+          actorId: t.actorId,
+          x: t.x,
+          y: t.y,
+          elevation: t.elevation,
+          hidden: t.hidden,
+          inExplored
+        };
+      })
     };
   },
 
@@ -1655,11 +1685,30 @@ const handlers = {
     const el = document.querySelector(selector);
     if (!el) return { error: `Element not found: ${selector}` };
 
+    // Work around html2canvas-pro's lack of support for color(srgb …) in
+    // gradient color stops (CSS Color Level 4).  Temporarily hide elements
+    // whose computed background uses that syntax.
+    const patched = [];
+    function patchGradients(node) {
+      if (!node?.style) return;
+      try {
+        const bg = getComputedStyle(node).backgroundImage;
+        if (typeof bg === "string" && /color\(srgb\b/i.test(bg)) {
+          patched.push({ el: node, old: node.style.display });
+          node.style.display = "none";
+        }
+      } catch (_) { /* cross-origin or unstyleable */ }
+      for (const child of node.children) patchGradients(child);
+    }
+    patchGradients(el);
+
     let rendered;
     try {
       rendered = await h2c(el, { scale, logging: false, backgroundColor: format === "jpeg" ? "#000" : null, useCORS: true });
     } catch (err) {
       return { error: `html2canvas failed: ${err.message}` };
+    } finally {
+      for (const { el: pEl, old } of patched) pEl.style.display = old;
     }
 
     const dataUrl = rendered.toDataURL(mime, quality);
@@ -1969,7 +2018,14 @@ const handlers = {
         await r.evaluate();
         return r;
       });
-      return summariseRoll(roll);
+      // Post to chat so the GM/players can see the result
+      const msg = await roll.toMessage({
+        speaker: ChatMessage.getSpeaker(),
+        flavor: params.label ?? params.formula
+      });
+      const summary = summariseRoll(roll);
+      summary.chatMessageId = msg.id;
+      return summary;
     } catch (err) {
       return { error: err.message, stack: err.stack };
     }
@@ -1977,9 +2033,10 @@ const handlers = {
 
   /**
    * Trigger an item on an actor (weapon, spell, feature) and capture the
-   * resulting chat messages. Many Vagabond item methods (rollAttack,
-   * rollDamage) need sheet context and fail headlessly — prefer the `click`
-   * tool which drives the real DOM click path.
+   * resulting chat messages. For systems whose roll path lives on the actor
+   * data model (e.g. Shadowdark weapons → actor.system.rollAttack), this
+   * auto-routes via SYSTEM_ITEM_INVOKERS to fire the system's own card. An
+   * explicit `method` param always overrides the auto-route.
    */
   use_item: async (params = {}) => {
     return runAuditedMutation("use_item", params, capturePlans.actor, async () => {
@@ -1989,9 +2046,23 @@ const handlers = {
       const item = actor.items.get(params.item) ?? actor.items.getName(params.item);
       if (!item) return { error: `Item not found on ${actor.name}: ${params.item}` };
 
+      // System-native card path (e.g. Shadowdark weapons), unless the caller
+      // forces a specific item method.
+      if (!params.method) {
+        const invoke = SYSTEM_ITEM_INVOKERS[game.system.id]?.(actor, item, params);
+        if (invoke) {
+          try {
+            const { messages } = await runWithCapture({ rig: params.rig }, invoke);
+            return { actor: actor.name, item: item.name, method: "system.rollAttack", messagesCreated: messages.length, messages };
+          } catch (err) {
+            return { error: err.message, stack: err.stack };
+          }
+        }
+      }
+
       const method = params.method ?? (typeof item.use === "function" ? "use" : "roll");
       if (typeof item[method] !== "function") {
-        return { error: `Item ${item.name} has no ${method}() method.` };
+        return { error: `Item ${item.name} has no ${method}() method. For structured attack/damage rolls use request_item_use (d20-style systems + Shadowdark NPCs); otherwise pass an explicit \`method\`.` };
       }
 
       try {
@@ -2023,8 +2094,8 @@ const handlers = {
   get_token_details: (params = {}) => {
     const scene = game.scenes.active;
     if (!scene) return { error: "No active scene" };
-    const t = _findToken(scene, params.token);
-    if (!t) return { error: `Token not found: ${params.token}` };
+    const t = _findToken(scene, params.tokenName);
+    if (!t) return { error: `Token not found: ${params.tokenName}` };
 
     const obj = t.toObject();
     const actor = t.actor;
@@ -2058,16 +2129,26 @@ const handlers = {
     return runAuditedMutation("move_token", params, capturePlans.token, async () => {
       const scene = game.scenes.active;
       if (!scene) return { error: "No active scene" };
-      const t = _findToken(scene, params.token);
-      if (!t) return { error: `Token not found: ${params.token}` };
+      const t = _findToken(scene, params.tokenName);
+      if (!t) return { error: `Token not found: ${params.tokenName}` };
       if (typeof params.x !== "number" || typeof params.y !== "number") {
         return { error: "x and y are required numbers" };
+      }
+      // Guard: onlyUnexplored — reject if destination is already explored
+      if (params.onlyUnexplored) {
+        const fogExploration = scene.fog?.mode > 0;
+        if (!fogExploration) return { error: "onlyUnexplored is set but fog exploration is disabled on this scene" };
+        const explored = canvas?.fog?.isPointExplored?.({x: params.x, y: params.y});
+        if (explored === undefined) return { error: "Cannot determine fog state — canvas.fog not initialised" };
+        if (explored) return { error: `Destination (${params.x}, ${params.y}) is already explored — onlyUnexplored is set` };
       }
       // Foundry v13+: token position updates persist only with { animate: false }.
       // The v12-era { animation: { duration: 0 } } no longer disables animation, and an
       // animated move driven over the bridge reverts (the document snaps back to origin).
       await t.update({ x: params.x, y: params.y }, { animate: false });
-      return { id: t.id, name: t.name, x: t.x, y: t.y };
+      const refreshed = scene.tokens.get(t.id);
+      if (!refreshed) return { error: "Token lost during movement" };
+      return { id: refreshed.id, name: refreshed.name, x: refreshed.x, y: refreshed.y };
     });
   },
 
@@ -2082,10 +2163,18 @@ const handlers = {
     return runAuditedMutation("move_token_pathed", params, capturePlans.token, async () => {
       const scene = game.scenes.active;
       if (!scene) return { error: "No active scene" };
-      const t = _findToken(scene, params.token);
-      if (!t) return { error: `Token not found: ${params.token}` };
+      const t = _findToken(scene, params.tokenName);
+      if (!t) return { error: `Token not found: ${params.tokenName}` };
       if (typeof params.x !== "number" || typeof params.y !== "number") {
         return { error: "x and y are required numbers" };
+      }
+      // Guard: onlyUnexplored — reject if destination is already explored
+      if (params.onlyUnexplored) {
+        const fogExploration = scene.fog?.mode > 0;
+        if (!fogExploration) return { error: "onlyUnexplored is set but fog exploration is disabled on this scene" };
+        const explored = canvas?.fog?.isPointExplored?.({x: params.x, y: params.y});
+        if (explored === undefined) return { error: "Cannot determine fog state — canvas.fog not initialised" };
+        if (explored) return { error: `Destination (${params.x}, ${params.y}) is already explored — onlyUnexplored is set` };
       }
 
       const animate  = params.animate !== false;
@@ -2193,8 +2282,8 @@ const handlers = {
     return runAuditedMutation("update_token", params, capturePlans.token, async () => {
       const scene = game.scenes.active;
       if (!scene) return { error: "No active scene" };
-      const t = _findToken(scene, params.token);
-      if (!t) return { error: `Token not found: ${params.token}` };
+      const t = _findToken(scene, params.tokenName);
+      if (!t) return { error: `Token not found: ${params.tokenName}` };
       if (!params.updates || typeof params.updates !== "object") {
         return { error: "updates object is required" };
       }
@@ -2240,8 +2329,8 @@ const handlers = {
     return runAuditedMutation("toggle_token_condition", params, capturePlans.token, async () => {
       const scene = game.scenes.active;
       if (!scene) return { error: "No active scene" };
-      const t = _findToken(scene, params.token);
-      if (!t) return { error: `Token not found: ${params.token}` };
+      const t = _findToken(scene, params.tokenName);
+      if (!t) return { error: `Token not found: ${params.tokenName}` };
       if (!params.condition) return { error: "condition is required" };
       if (!t.actor) return { error: "Token has no linked actor" };
 
@@ -4355,6 +4444,72 @@ const handlers = {
       catch { result = String(raw); }
     }
     return { moduleId, fn, result };
+  },
+
+  /**
+   * Query spatial grid state for one or more cells. Returns per-cell booleans
+   * for explored (fog), visible (current LOS), and occupied (token present).
+   * Designed as a structured alternative to screenshot-based spatial reasoning.
+   *
+   * Cells: array of {gx, gy} grid coordinates, OR a region {minGX, minGY, maxGX, maxGY}.
+   * Grid coords are 0-indexed; pixel coords are returned for each cell center.
+   */
+  query_grid: (params = {}) => {
+    const scene = game.scenes.active;
+    if (!scene) return { error: "No active scene" };
+    const gridSize = scene.grid.size;
+    if (!gridSize) return { error: "Scene has no grid size" };
+
+    // Build cell list from either `cells` array or `region` bounding box
+    const cellSpecs = [];
+    if (Array.isArray(params.cells)) {
+      for (const c of params.cells) {
+        if (typeof c.gx === "number" && typeof c.gy === "number") cellSpecs.push(c);
+      }
+    } else if (params.region) {
+      const r = params.region;
+      for (let gy = r.minGY; gy <= r.maxGY; gy++) {
+        for (let gx = r.minGX; gx <= r.maxGX; gx++) {
+          cellSpecs.push({ gx, gy });
+        }
+      }
+    }
+    if (cellSpecs.length === 0) return { error: "No cells specified — pass `cells` array or `region` object" };
+    if (cellSpecs.length > 2500) return { error: `Too many cells requested (${cellSpecs.length}), max 2500` };
+
+    const fogExploration = scene.fog?.mode > 0;
+    const cellFromToken  = params.from;          // optional: check reachability from this token
+    let fromToken = null;
+    let fromCenter  = null;
+    if (cellFromToken) {
+      fromToken = _findToken(scene, cellFromToken);
+      if (!fromToken) return { error: `Token not found: ${cellFromToken}` };
+      fromCenter = { x: fromToken.x + fromToken.width / 2, y: fromToken.y + fromToken.height / 2 };
+    }
+
+    const cells = cellSpecs.map(({ gx, gy }) => {
+      const cx = (gx + 0.5) * gridSize;
+      const cy = (gy + 0.5) * gridSize;
+      const explored = fogExploration ? (canvas?.fog?.isPointExplored?.({x: cx, y: cy}) ?? false) : true;
+      const visible   = canvas?.visibility?.testVisibility?.({x: cx, y: cy}, {tolerance: 0}) ?? (game.user?.isGM ?? false);
+      // Occupancy: does any token's center lie in this cell?
+      let occupied = false;
+      let occupiedBy = null;
+      for (const t of scene.tokens.contents) {
+        const tcx = t.x + t.width / 2;
+        const tcy = t.y + t.height / 2;
+        if (Math.floor(tcx / gridSize) === gx && Math.floor(tcy / gridSize) === gy) {
+          occupied = true;
+          occupiedBy = { id: t.id, name: t.name, actorId: t.actorId };
+          break;
+        }
+      }
+      const result = { gx, gy, x: cx, y: cy, explored, visible, occupied };
+      if (occupiedBy) result.occupiedBy = occupiedBy;
+      return result;
+    });
+
+    return { sceneId: scene.id, gridSize, fogExploration, cellCount: cells.length, cells };
   }
 };
 
@@ -4651,6 +4806,13 @@ Hooks.once("init", () => {
     config: false,
     type: String,
     default: "",
+    onChange: () => {
+      // The gateway mints a new keypair on every MCP server restart. World
+      // settings propagate to every client, so this is the moment to drop the
+      // cached key — otherwise a long-open client keeps verifying against the
+      // old one and silently rejects everything while still looking healthy.
+      try { notifyGatewayKeysRotated(); } catch { /* relay not initialised */ }
+    },
   });
 
   // Whether `evaluate` may be dispatched over the relay. Off by design: in a
