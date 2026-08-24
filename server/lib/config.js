@@ -105,6 +105,17 @@ export const WS_TOKEN         = process.env.FOUNDRY_WS_TOKEN ?? BRIDGE_TOKEN;
 // machine. Used to decide whether an unauthenticated bridge is a real hazard.
 export const WS_HOST_IS_LOOPBACK = /^(127\.\d+\.\d+\.\d+|::1|localhost)$/i.test(WS_HOST);
 
+// Extra browser origins allowed to open a bridge socket from this machine
+// without a token. Any loopback origin (http://localhost:30000 and friends) is
+// already accepted, so this is only needed when the Foundry client is served
+// from a non-loopback name that still reaches the bridge over loopback — an
+// SSH tunnel, or a hosts-file alias like http://foundry.lan:30000.
+// Comma-separated, exact origins: "https://foo.example,http://bar.lan:30000".
+export const WS_ALLOWED_ORIGINS = (process.env.FOUNDRY_WS_ALLOWED_ORIGINS ?? "")
+  .split(",")
+  .map(value => value.trim())
+  .filter(Boolean);
+
 // `evaluate` runs arbitrary JS in the live Foundry browser context. Gated
 // behind an explicit opt-in to make the default install safer.
 export const ALLOW_EVAL       = /^(1|true|yes)$/i.test(process.env.FOUNDRY_MCP_ALLOW_EVAL ?? "");

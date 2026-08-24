@@ -17,7 +17,7 @@
  * installs keep working until they're upgraded.
  */
 import { WebSocketServer } from "ws";
-import { WS_PORT, WS_HOST, WS_HOST_IS_LOOPBACK, HELLO_DEADLINE_MS, HEARTBEAT_INTERVAL_MS, WS_TOKEN, SERVER_VERSION, SERVER_ROOT, PROTOCOL_VERSION } from "./config.js";
+import { WS_PORT, WS_HOST, WS_HOST_IS_LOOPBACK, WS_ALLOWED_ORIGINS, HELLO_DEADLINE_MS, HEARTBEAT_INTERVAL_MS, WS_TOKEN, SERVER_VERSION, SERVER_ROOT, PROTOCOL_VERSION } from "./config.js";
 import { log }                        from "./log.js";
 import { pendingRequests }            from "./foundry-rpc.js";
 
@@ -79,6 +79,113 @@ export function routeBridge(targetUser) {
 }
 
 /**
+ * Is this peer address this machine?
+ *
+ * `ws` reports IPv4 loopback as `127.0.0.1` and IPv6 as `::1`; when the server
+ * is bound to `::`, IPv4 peers arrive v4-mapped as `::ffff:127.0.0.1`. All
+ * three mean the same thing — a process running as this user.
+ */
+export function isLoopbackAddress(addr) {
+  const a = String(addr ?? "").trim().toLowerCase().replace(/^::ffff:/, "");
+  return a === "::1" || a === "localhost" || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(a);
+}
+
+/**
+ * May this peer skip the bridge token?
+ *
+ * The token exists to protect the port that `FOUNDRY_WS_HOST` opens to the
+ * LAN. A client on the loopback interface is already running as this user and
+ * gains nothing by authenticating — which is why a local world should never
+ * have needed a token pasted into its settings.
+ *
+ * But "arrived on loopback" is not by itself "trusted": CORS does not apply to
+ * WebSockets, so any page the user happens to visit can open a socket to
+ * 127.0.0.1 and try to register as a GM bridge. The browser's `Origin` header
+ * is the discriminator — page JS cannot forge it — so a loopback peer is
+ * trusted only when its origin is a Foundry one.
+ *
+ * Rules, in order:
+ *   - a proxied request is never local: an `X-Forwarded-*` header means the
+ *     loopback address belongs to the proxy, not to the peer behind it
+ *   - a non-loopback peer is never local, whatever it claims as its origin
+ *   - no `Origin` at all → not a browser (a script, a test harness); on
+ *     loopback that is already user-privileged, so it is allowed
+ *   - `Origin: null` → sandboxed iframe or `file://`, which a hostile page can
+ *     arrange deliberately, so it is refused
+ *   - an explicitly allowlisted origin is allowed
+ *   - otherwise the origin must itself be a loopback URL — the Foundry client
+ *     served from localhost on any port
+ *
+ * @returns {boolean} true when the token requirement may be skipped
+ */
+export function isTrustedLocalPeer({ remoteAddress, origin, forwarded = false, allowedOrigins = [] } = {}) {
+  if (forwarded) return false;
+  if (!isLoopbackAddress(remoteAddress)) return false;
+
+  const normalize = (v) => String(v ?? "").trim().toLowerCase().replace(/\/+$/, "");
+  const raw = normalize(origin);
+  if (!raw) return true;
+  if (raw === "null") return false;
+  if (allowedOrigins.some(allowed => normalize(allowed) === raw)) return true;
+
+  try {
+    // IPv6 hostnames arrive bracketed ("[::1]"); strip them before matching.
+    return isLoopbackAddress(new URL(raw).hostname.replace(/^\[|\]$/g, ""));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Identify a hello frame that has NOT passed the token check yet.
+ *
+ * Every field here is attacker-controlled — the peer failed auth, so it is
+ * whatever reached the port. Control characters are stripped and each field
+ * capped so a rejected peer cannot forge extra log lines or flood the log
+ * through a value we echo back into it.
+ *
+ * @param {object} [msg] a parsed `hello` frame
+ * @returns {string} e.g. `Gamemaster @ http://localhost:30000 (world "crow-test")`
+ */
+export function describeUnauthedHello(msg = {}) {
+  const clean = (v) => String(v ?? "").replace(/[\u0000-\u001F\u007F]/g, "").trim().slice(0, 64);
+  const name  = clean(msg.userName) || "unidentified client";
+  const where = clean(msg.origin) || clean(msg.host);
+  const world = clean(msg.worldId);
+  return `${name}${where ? ` @ ${where}` : ""}${world ? ` (world "${world}")` : ""}`;
+}
+
+/**
+ * Why a hello frame's token was rejected, in operator-actionable terms.
+ *
+ * Split out from the reject path because three failures that are identical
+ * from the socket's point of view need opposite advice: nothing was sent (the
+ * world setting was never filled in), a paste picked up whitespace, or the
+ * value is genuinely different. The old "invalid or missing token" line sent
+ * operators to re-check a token they had never set in the first place.
+ *
+ * Lengths, never values — enough to spot a truncated or padded paste without
+ * writing the token itself into the log.
+ *
+ * @param {unknown} sent     the `token` field as it arrived
+ * @param {string}  expected the configured WS token
+ * @returns {string}
+ */
+export function explainTokenRejection(sent, expected) {
+  if (sent === undefined || sent === null || sent === "") {
+    return `no token sent — this world's "MCP bridge token" setting and the client's localStorage.mcpBridgeToken are both empty`;
+  }
+  if (typeof sent !== "string") {
+    return `token field was ${typeof sent}, expected a string`;
+  }
+  if (sent.trim() === String(expected ?? "").trim()) {
+    return `token matches apart from surrounding whitespace (sent ${sent.length} chars, expected ${expected.length}) `
+      + `— check for a trailing newline or wrapping quotes in the server env file`;
+  }
+  return `token does not match (sent ${sent.length} chars, expected ${expected.length})`;
+}
+
+/**
  * Start the WebSocket server that Foundry bridges connect to. Call once
  * from `server.js` startup. Returns the WebSocketServer instance for tests
  * or graceful shutdown handlers.
@@ -93,6 +200,18 @@ export function startBridgeServer() {
   // surface bind errors clearly with actionable hints.
   wss.on("listening", () => {
     log(`WebSocket bridge listening on ws://${WS_HOST}:${WS_PORT}`);
+    // State the auth posture every start, both ways. The token comes from the
+    // environment, which is read once at process start — so an env file edited
+    // days ago arms the gate on the next restart with nothing marking the
+    // moment, and the only symptom is every client reconnect-looping on a 1008
+    // that is invisible from the server side. One line here makes "auth is on"
+    // answerable from the log instead of from a browser console.
+    log(WS_TOKEN
+      ? `Bridge auth: REQUIRED for clients from another machine — a Foundry client on this machine connects `
+        + `without one. Set "MCP bridge token" in a world's Foundry MCP Live settings only for the clients that `
+        + `reach this server remotely.`
+        + (WS_ALLOWED_ORIGINS.length ? ` Also trusted locally: ${WS_ALLOWED_ORIGINS.join(", ")}.` : "")
+      : `Bridge auth: OFF — no FOUNDRY_WS_TOKEN or BRIDGE_TOKEN set, every client that reaches the port is trusted.`);
     // Binding off-loopback is the deliberate "let a second device connect"
     // move. Doing it without a token means anything that can route to this
     // port can register as a GM bridge and drive the world — including the
@@ -115,7 +234,17 @@ export function startBridgeServer() {
     throw err;
   });
 
-  wss.on("connection", (socket) => {
+  wss.on("connection", (socket, req) => {
+    // Decide the trust level once, from the handshake — the HTTP upgrade
+    // request is the only place the peer address and Origin are available, and
+    // both are gone by the time the hello frame arrives.
+    const trustedLocal = isTrustedLocalPeer({
+      remoteAddress:  req?.socket?.remoteAddress,
+      origin:         req?.headers?.origin,
+      forwarded:      Boolean(req?.headers?.["x-forwarded-for"] || req?.headers?.["x-forwarded-host"] || req?.headers?.forwarded),
+      allowedOrigins: WS_ALLOWED_ORIGINS,
+    });
+    const tokenRequired = Boolean(WS_TOKEN) && !trustedLocal;
     log("Foundry bridge socket opened (awaiting hello)");
 
     // Heartbeat liveness (see the interval below). A fresh socket starts
@@ -131,8 +260,8 @@ export function startBridgeServer() {
     // fallback bypasses auth so we close the socket instead).
     const helloTimer = setTimeout(() => {
       pendingHello.delete(socket);
-      if (WS_TOKEN) {
-        log("Bridge missed hello and a bridge token is set — closing socket");
+      if (tokenRequired) {
+        log("Bridge missed hello and a bridge token is required for this peer — closing socket");
         socket.close(1008, "auth required");
         return;
       }
@@ -156,15 +285,27 @@ export function startBridgeServer() {
         const t = pendingHello.get(socket);
         if (t) { clearTimeout(t); pendingHello.delete(socket); }
 
-        if (WS_TOKEN && msg.token !== WS_TOKEN) {
-          log(`Bridge hello rejected: invalid or missing token`);
+        if (tokenRequired && msg.token !== WS_TOKEN) {
+          log(`Bridge hello rejected from ${describeUnauthedHello(msg)}: ${explainTokenRejection(msg.token, WS_TOKEN)}`);
           socket.close(1008, "auth failed");
           return;
+        }
+        // A local client whose world still carries an old token is fine — it
+        // was never being checked — but say so once, because a stale value in
+        // a world setting is exactly what breaks that world on a remote
+        // client later.
+        if (WS_TOKEN && trustedLocal && msg.token && msg.token !== WS_TOKEN) {
+          log(`Note: local bridge sent a token that does not match FOUNDRY_WS_TOKEN — ignored (local clients are not `
+            + `token-checked), but this world's "MCP bridge token" setting is stale and will fail from another machine.`);
         }
 
         const { userId, userName, isGM, host, origin, worldId, systemId, foundryVersion } = msg;
         if (!userId || !userName) {
-          log(`Bridge sent malformed hello, ignoring: ${JSON.stringify(msg)}`);
+          // Redact before echoing the frame: this line is downstream of the
+          // token check, so a frame that reaches it carries the *correct*
+          // token — stringifying it verbatim wrote the real secret to the log.
+          const safe = { ...msg, token: msg.token ? "[redacted]" : undefined };
+          log(`Bridge sent malformed hello, ignoring: ${JSON.stringify(safe)}`);
           return;
         }
 
@@ -197,7 +338,10 @@ export function startBridgeServer() {
           disconnectedAt: null,
         });
         const hostStr = host ? ` @ ${host}` : "";
-        log(`Bridge registered: ${userName}${hostStr} (${userId}) [${isGM ? "GM" : "player"}]`);
+        // Record how the peer got in. With a token set, "which of my bridges
+        // is actually authenticating?" is otherwise unanswerable from the log.
+        const trustStr = !WS_TOKEN ? "" : trustedLocal ? " [local, no token required]" : " [token accepted]";
+        log(`Bridge registered: ${userName}${hostStr} (${userId}) [${isGM ? "GM" : "player"}]${trustStr}`);
 
         // Announce our version back to the module. The module compares this
         // against its own and warns the user (in the Foundry UI) if the server

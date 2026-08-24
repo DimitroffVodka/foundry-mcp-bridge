@@ -17,7 +17,12 @@
  *   BRIDGE_TOKEN              – If set, required for HTTP + WS connections
  *   FOUNDRY_WS_TOKEN          – Bridge-only token; overrides BRIDGE_TOKEN for the
  *                               WebSocket half so you can secure a LAN-exposed
- *                               bridge without adding auth to loopback MCP clients
+ *                               bridge without adding auth to loopback MCP clients.
+ *                               Required only of bridges from another machine —
+ *                               a Foundry client on this machine connects without it
+ *   FOUNDRY_WS_ALLOWED_ORIGINS – Extra browser origins allowed to connect from this
+ *                               machine without a token (comma-separated). Loopback
+ *                               origins are already allowed
  *   FOUNDRY_MCP_ALLOW_EVAL    – "1" enables the `evaluate` tool (off by default)
  */
 

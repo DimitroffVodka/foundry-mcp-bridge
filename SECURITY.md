@@ -53,6 +53,15 @@ Prefer `FOUNDRY_WS_TOKEN` for the LAN case. `/mcp` is bound to `127.0.0.1` in co
 FOUNDRY_WS_TOKEN=$(openssl rand -hex 24)
 ```
 
+**The token applies to clients from another machine, not to yours.** A Foundry client connecting over loopback is already running as the user who owns the server process, so requiring it to authenticate protects nothing — while costing a pasted secret in every world you create, and failing with a silent reconnect loop when you forget. So a peer on the loopback interface skips the token check, and the LAN clients the token exists for are unaffected.
+
+Loopback alone isn't enough to be trusted, because CORS does not apply to WebSockets: any page you happen to visit can open a socket to `127.0.0.1`. The discriminator is the browser's `Origin` header, which page JavaScript cannot forge. A local peer is trusted when:
+
+- the connection is not proxied (an `X-Forwarded-*` header means the loopback address belongs to the proxy, not the peer), **and**
+- its `Origin` is a loopback URL, or is listed in `FOUNDRY_WS_ALLOWED_ORIGINS`, or is absent entirely (no `Origin` means no browser — a script or test harness, which on loopback is already user-privileged).
+
+`Origin: null` — a sandboxed iframe or a `file://` page — is refused, since a hostile page can arrange it deliberately. A world setting holding a stale token still connects locally; the server logs a note that the value would fail from another machine.
+
 **Who ends up holding the token.** The Foundry-side value lives in a world-scoped module setting, which Foundry serves to every client that loads the world. That is the point — it's what removes the per-device setup step — but it does mean the token is readable by anyone who can log into the world, not just the GM. The trade is deliberate:
 
 | Bridge binding | Who can register a bridge |
